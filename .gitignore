@@ -7,3 +7,7 @@ config.yaml
 config.yml
 state/
 .env
+
+# Local signage media and mpv IPC sockets are never committed.
+media/
+*.sock

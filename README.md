@@ -1,12 +1,23 @@
 # Signage Controller
 
-Local desired-state control for LG webOS televisions. It connects directly to
-each TV over the LAN, selects the configured HDMI input, and sets an absolute
-volume without muting. It does not use LG ThinQ, cloud services, CEC,
-Wake-on-LAN, media playback, or display-layout control.
+Screenkeeper manages two independent desired states for digital signage from
+one YAML configuration file:
 
-This is Phase 1 of the signage controller. The configuration supports multiple
-TVs, but start by commissioning one TV completely before adding more.
+1. **LG webOS television state over the LAN** (Phase 1): connects directly to
+   each TV, selects the configured HDMI input, and sets an absolute volume
+   without muting. It does not use LG ThinQ, cloud services, CEC, or
+   Wake-on-LAN.
+2. **Local signage playback through mpv** (Phase 2): keeps a configured local
+   video looping fullscreen on the host's display, independent of whether the
+   paired TV is reachable.
+
+These two subsystems are intentionally decoupled. A TV being powered off does
+not stop its player from looping; a player being unavailable does not stop TV
+convergence. When staff turns a TV back on, Screenkeeper switches it to the
+correct HDMI input and the video is already there.
+
+The configuration supports multiple TVs and multiple players, but start by
+commissioning one TV and one player completely before adding more.
 
 ## Requirements
 
@@ -14,6 +25,8 @@ TVs, but start by commissioning one TV completely before adding more.
 - Network reachability between the Linux host and the TV
 - LG webOS local/mobile control enabled on the TV, if its firmware exposes the
   setting
+- `mpv`, only if using local signage playback (see "mpv Playback" below); not
+  required for TV-only commands
 
 On recent LG webOS versions, the relevant setting is commonly named **LG
 Connect Apps** under **All Settings > General > Devices > External Devices**.
@@ -190,11 +203,195 @@ is the periodic correctness fallback after the initial reconciliation.
 `power_on_delay` is a non-negative number of seconds. It defaults to `15` and
 is used after each successful connection and an observed off-to-on state change.
 
+## mpv Playback
+
+Local looping video playback through `mpv`, configured in the same YAML file
+as TV control and driven by a separate `signage-controller playback ...`
+command group. Playback is architecturally independent of TV control: a
+player keeps looping fullscreen whether or not its associated TV is
+reachable, and `tv_id` on a player is used only for logs/diagnostics, never
+to gate playback.
+
+`mpv` is a **host-native** component. It is never added to the Docker image
+and never given access to `/dev/dri`, X11/Wayland sockets, or DRM devices
+inside a container — see "Docker" below. Running TV-only commands (`pair`,
+`status`, `inputs`, `apply`, `run`) never requires `mpv` to be installed.
+
+### Install
+
+```bash
+sudo apt install mpv
+```
+
+### Playback Configuration
+
+Add an optional `playback:` section to `config.yaml`:
+
+```yaml
+playback:
+  mpv_binary: mpv
+  restart_delay: 2
+  hwdec: auto
+  fullscreen: true
+  loop: true
+  audio: false
+
+  players:
+    - id: dev-menu
+      name: Development Menu
+      media: ./media/menu.mp4
+
+      # Optional association for logs/metadata only. Playback never depends
+      # on TV reachability.
+      tv_id: dev-tv
+
+      # Optional display selection for multi-monitor hosts (mutually
+      # exclusive). Numeric index or connector/output name, e.g. from
+      # `xrandr --query` under X11:
+      # screen: 0
+      # screen_name: DP-1
+```
+
+A configuration without a `playback:` section behaves exactly as it did in
+Phase 1 — no `mpv` dependency or runtime behavior is introduced.
+
+`mpv_binary` is the `mpv` executable to run; defaults to `mpv` (resolved from
+`PATH`). `restart_delay` is a non-negative number of seconds used as the base
+delay before restarting a crashed player, with capped backoff on repeated
+failures; defaults to `2`. `hwdec` is passed through to mpv's `--hwdec`
+option; defaults to `auto` (mpv's own safe hardware-decode probing, with
+automatic software fallback). `fullscreen`, `loop`, and `audio` are booleans
+defaulting to `true`, `true`, and `false` respectively; `audio: false`
+disables mpv's audio output entirely so playback never depends on a working
+ALSA/PulseAudio/PipeWire device — the TV's own volume is set to zero
+separately by TV control.
+
+Each player needs a unique `id`, a non-empty `name`, and a `media` path.
+Relative `media` paths resolve against the directory containing `config.yaml`
+(not the process's working directory), so `./media/menu.mp4` next to
+`/etc/screenkeeper/config.yaml` resolves to
+`/etc/screenkeeper/media/menu.mp4`. `media` does not need to exist when the
+configuration is loaded — a valid-but-missing path is a runtime "waiting for
+media" state, not a configuration error; the player supervisor waits and
+retries without crash-looping, and starts playback once the file appears.
+
+`screen` (a non-negative integer) and `screen_name` (a connector/output name
+string) are mutually exclusive and both optional; omitting both lets mpv use
+the default/current display, which is the normal case for the one-display
+development walkthrough below. Screen selection uses mpv's own native
+`--screen`/`--fs-screen` (numeric) or `--screen-name`/`--fs-screen-name`
+(named) options — Screenkeeper does not reimplement display enumeration.
+Numeric monitor ordering is not guaranteed stable across reboots, especially
+under Wayland; prefer `screen_name` once real connector names are known for a
+given deployment. Screenkeeper does not hardcode connector names for any
+specific hardware — those are always discovered and configured per host.
+
+Display resolution and refresh rate are **not** playback configuration.
+`mpv` renders fullscreen into whatever mode the display system already
+provides and scales the source video while preserving aspect ratio; fixed
+display mode-setting belongs to a later physical-display deployment phase.
+
+### One-Player Development Walkthrough
+
+With `mpv` installed and a `playback:` section like the example above added
+to `config.yaml` (using a real local video file for `media`):
+
+```bash
+signage-controller playback check
+```
+
+Reports the resolved `mpv` binary path and version, configured players,
+whether each player's media currently exists, configured `hwdec`/
+`fullscreen`/`loop`/`audio` settings, and `DISPLAY`/`WAYLAND_DISPLAY`
+environment hints. If `mpv` cannot be found, it prints an actionable message
+instead of starting anything.
+
+```bash
+signage-controller playback command dev-menu
+```
+
+Prints the exact, shell-quoted `mpv` argv Screenkeeper would execute for that
+player. This is diagnostic only — it never runs `mpv` — and is especially
+useful while commissioning new hardware.
+
+```bash
+signage-controller playback start dev-menu
+```
+
+Launches that one configured player in the foreground: fullscreen, looping
+indefinitely, no on-screen controls or OSD, no audio (unless configured
+otherwise). Press **Ctrl-C** to exit cleanly; a deliberate Ctrl-C here always
+exits and never restarts.
+
+Unlike `playback run`, this command fails fast with a clear message if the
+media file is missing rather than waiting for it to appear — during
+interactive commissioning an immediate error is more useful than a silent
+wait. Waiting/retrying is `playback run`'s job.
+
+```bash
+signage-controller playback run
+```
+
+Starts the persistent supervisor for every configured player — one
+independent task per player, so one player's failure never stops another's.
+If you kill the running `mpv` process directly (`kill <pid>`), the supervisor
+restarts it automatically after a short backoff. Stop with **Ctrl-C**; this
+shuts every player down cleanly (asking `mpv` to quit over its IPC socket,
+then `SIGTERM`, then `SIGKILL` only as a last resort) with no orphaned `mpv`
+processes left behind.
+
+`playback run` uses its own single-instance lock (independent of TV `run`'s
+lock), so both commands can run concurrently on the same host and state
+directory, matching the architecture's independence between TV control and
+playback.
+
+### X11 and Wayland
+
+Deterministic multi-monitor placement is expected primarily under X11, since
+Wayland compositors generally do not let applications choose arbitrary
+window positions. For the one-display development case, playback works
+under either X11 or Wayland on the default display. Screenkeeper does not
+install or configure Xorg, and does not switch or manage the host's
+graphical session.
+
+### Future Multi-Display Deployment
+
+The eventual production shape adds one player per physical display, each
+with its own discovered `screen_name`:
+
+```yaml
+playback:
+  players:
+    - id: menu-left
+      media: /var/lib/screenkeeper/media/left.mp4
+      tv_id: menu-left
+      screen_name: DP-1
+    - id: menu-center
+      media: /var/lib/screenkeeper/media/center.mp4
+      tv_id: menu-center
+      screen_name: DP-2
+    - id: menu-right
+      media: /var/lib/screenkeeper/media/right.mp4
+      tv_id: menu-right
+      screen_name: DP-3
+```
+
+Connector names above are illustrative only; real names are discovered on
+the target hardware, not assumed in advance. Physical display topology
+management, EDID handling, Xorg provisioning, autologin, and production
+multi-monitor mode-setting are deferred to that later deployment phase — see
+"Real-Hardware Validation" below.
+
 ## Observability
 
 Telemetry is optional and is active only for the long-running `run` command.
 Commissioning commands (`pair`, `status`, `inputs`, and `apply`) keep their logs
-local and do not publish metrics.
+local and do not publish metrics. Loki and Prometheus Remote Write below cover
+TV control only; `playback run` does not yet publish player metrics —
+extending `PrometheusStatusReporter` with `player_id`-labeled gauges
+(`signage_controller_player_up`, `_restarts_total`,
+`_status_updated_timestamp_seconds`) is documented, low-risk follow-up work,
+not part of this phase.
 
 ### Loki Logs
 
@@ -324,6 +521,45 @@ Debug output can include detailed TV and protocol information, so leave it off
 in normal operation. Loki ships the controller's own debug records but excludes
 dependency protocol logs.
 
+### Playback Logs
+
+`playback run` logs state transitions rather than polling activity:
+
+```text
+INFO dev-menu: starting mpv for /var/lib/screenkeeper/media/menu.mp4
+INFO dev-menu: mpv started pid=1234
+INFO dev-menu: playback healthy
+```
+
+An unexpected exit is reported once per occurrence, with the delay before the
+next attempt and a bounded tail of mpv's own output:
+
+```text
+WARNING dev-menu: mpv exited unexpectedly with status 1; retrying in 2.0s
+```
+
+Repeated failures back off (base `restart_delay`, then capped multiples of it)
+instead of restarting in a tight loop. The backoff resets once a player has
+stayed up for a sustained period.
+
+Missing media logs one transition in each direction, not one line per poll:
+
+```text
+INFO dev-menu: media unavailable; waiting for /var/lib/screenkeeper/media/menu.mp4
+INFO dev-menu: media became available
+```
+
+Shutdown is likewise logged once per player:
+
+```text
+INFO dev-menu: stopping mpv
+INFO dev-menu: mpv stopped
+```
+
+mpv's own stdout/stderr is never dumped at `INFO`. It is captured in a bounded
+buffer, emitted line-by-line only at `DEBUG` (`signage-controller --debug
+playback run`), and summarized in the `WARNING` above on an abnormal exit.
+
 ## Pairing State
 
 By default, keys are stored at:
@@ -345,11 +581,21 @@ later system-service deployment. Do not commit this state file.
 ## Docker
 
 A multi-stage `Dockerfile` and `docker-compose.yml` are provided for running
-the controller as a container. `config.yaml` and pairing state are never
-baked into the image; they're mounted at runtime. The host's `config.yaml`
-must be readable by uid `10001` inside the container (for example
-`chmod 644 config.yaml`), since the container's non-root user won't match the
-host file owner by default.
+the TV-control side of the controller as a container. `config.yaml` and
+pairing state are never baked into the image; they're mounted at runtime.
+The host's `config.yaml` must be readable by uid `10001` inside the
+container (for example `chmod 644 config.yaml`), since the container's
+non-root user won't match the host file owner by default.
+
+**`mpv` playback is intentionally unavailable inside this container.** The
+image does not include `mpv`, and nothing mounts `/dev/dri`, X11/Wayland
+sockets, or DRM devices into it — mpv needs direct access to the host's
+graphical/display session, which a container does not provide without
+compromising isolation. Run `playback check`/`command`/`start`/`run`
+directly on the bare Linux host (see "mpv Playback" above); the containerized
+`signage-controller` image is for TV-only commands. A `config.yaml` with a
+`playback:` section is still fine to mount into the container — the
+container simply never runs the `playback` commands that would read it.
 
 Quick start:
 
@@ -432,6 +678,21 @@ The suite uses no real TV. It covers:
 - Shutdown versus generic connection-loss logs
 - Single-controller runtime locking
 - Optional Loki log delivery and Prometheus Remote Write TV-status reporting
+- Playback configuration validation (players optional/absent, unique IDs,
+  `screen`/`screen_name` mutual exclusion, `tv_id` cross-referencing,
+  relative `media` resolution against the config file)
+- mpv argv construction (fullscreen/loop/audio/hwdec/screen-selection flags,
+  IPC socket flag, safe handling of media filenames with spaces or a leading
+  `-`)
+- mpv JSON IPC request/reply framing, including interleaved event lines and
+  error responses, against a fake Unix-socket server
+- Player supervisor lifecycle: successful spawn, crash-triggered restart,
+  one failed player not affecting others, missing-media wait/retry,
+  media-appears-later recovery, and clean shutdown with no orphaned `mpv`
+  processes
+
+None of the automated coverage above requires `mpv`, an X server, Wayland, a
+GPU, a physical display, or a real LG TV.
 
 ## Real-TV Validation
 
@@ -443,5 +704,22 @@ Before relying on this controller in production, verify on every TV model:
 - Manual power-off and power-on recovery
 - Network behavior while the TV is powered off
 
-Phase 1 intentionally excludes mpv playback, physical display layout,
-systemd units, and HDMI/DP EDID behavior when a display is powered off.
+## Real-Hardware Validation (deferred)
+
+Phase 2 adds mpv playback but intentionally does not yet implement or
+validate physical display provisioning. Before production deployment on the
+target Lenovo ThinkCentre M710q (three DP-to-HDMI outputs, one LG TV each),
+still verify:
+
+- Actual connector names for `screen_name` (do not assume `DP-1`/`DP-2`/
+  `DP-3`)
+- X11 vs. an alternative graphical environment for multi-monitor placement
+- Three simultaneous 1920x1080@60Hz outputs
+- Intel VA-API hardware-decode behavior (`hwdec: vaapi`) versus the default
+  `hwdec: auto`
+- HDMI/DP hotplug behavior and EDID behavior when a TV is powered off
+- Whether display topology changes when one TV disappears
+
+Physical display topology management, EDID forcing/capture, Xorg
+configuration generation, autologin, kiosk desktop setup, and production
+three-monitor mode-setting are out of scope until that hardware validation.

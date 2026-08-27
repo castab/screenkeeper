@@ -105,3 +105,58 @@ class FakeTelevision(Television):
 
 def unavailable() -> TelevisionUnavailableError:
     return TelevisionUnavailableError("TV is powered off")
+
+
+class FakeMpvProcess:
+    """In-memory stand-in for asyncio.subprocess.Process, used by playback tests."""
+
+    def __init__(self, pid: int = 1234) -> None:
+        self.pid = pid
+        self.returncode: int | None = None
+        self.stdout: asyncio.StreamReader | None = None
+        self.terminated = False
+        self.killed = False
+        self._exit_event = asyncio.Event()
+
+    def finish(self, returncode: int = 0) -> None:
+        """Simulate the mpv process exiting on its own (crash, or a normal quit)."""
+        self.returncode = returncode
+        self._exit_event.set()
+
+    async def wait(self) -> int:
+        await self._exit_event.wait()
+        assert self.returncode is not None
+        return self.returncode
+
+    def terminate(self) -> None:
+        # Simulate mpv responding promptly to SIGTERM, matching real-world
+        # behavior closely enough to keep tests fast (no multi-second waits).
+        self.terminated = True
+        if self.returncode is None:
+            self.finish(-15)
+
+    def kill(self) -> None:
+        self.killed = True
+        if self.returncode is None:
+            self.finish(-9)
+
+
+class FakeProcessLauncher:
+    """Records launched argv lists and returns scripted FakeMpvProcess outcomes."""
+
+    def __init__(self, outcomes: list[Exception | FakeMpvProcess] | None = None) -> None:
+        self.launches: list[list[str]] = []
+        self.processes: list[FakeMpvProcess] = []
+        self._outcomes = list(outcomes) if outcomes else None
+
+    async def __call__(self, argv: list[str]) -> FakeMpvProcess:
+        self.launches.append(argv)
+        if self._outcomes:
+            outcome = self._outcomes.pop(0)
+            if isinstance(outcome, Exception):
+                raise outcome
+            process = outcome
+        else:
+            process = FakeMpvProcess(pid=1000 + len(self.processes))
+        self.processes.append(process)
+        return process

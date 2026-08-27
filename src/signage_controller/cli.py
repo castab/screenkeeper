@@ -6,12 +6,17 @@ import argparse
 import asyncio
 import contextlib
 import logging
+import os
+import shlex
+import shutil
 import signal
 from pathlib import Path
 
-from .config import ApplicationConfig, ConfigurationError, TvConfig, load_config
+from .config import ApplicationConfig, ConfigurationError, PlaybackConfig, TvConfig, load_config
 from .controller import DesiredInputError, converge, run_all
 from .observability import LokiHandler, ObservabilityError, PrometheusStatusReporter
+from .playback.mpv import MpvPlayer, build_mpv_argv, default_launcher
+from .playback.supervisor import resolve_socket_dir, run_playback
 from .runtime_lock import ControllerAlreadyRunningError, acquire_controller_lock
 from .state_store import StateStore, StateStoreError
 from .tv.base import Television, TelevisionError
@@ -23,7 +28,9 @@ LOGGER = logging.getLogger(__name__)
 
 def build_parser() -> argparse.ArgumentParser:
     """Build the CLI parser."""
-    parser = argparse.ArgumentParser(description="Local desired-state controller for LG webOS TVs.")
+    parser = argparse.ArgumentParser(
+        description="Local desired-state controller for LG webOS TVs and mpv signage playback."
+    )
     parser.add_argument("--config", type=Path, default=Path("config.yaml"), help="YAML configuration path")
     parser.add_argument("--state-dir", type=Path, help="Runtime state directory")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
@@ -32,6 +39,18 @@ def build_parser() -> argparse.ArgumentParser:
         command_parser = commands.add_parser(command)
         command_parser.add_argument("tv_id")
     commands.add_parser("run")
+
+    playback_parser = commands.add_parser(
+        "playback", help="Local mpv signage playback, independent of TV control."
+    )
+    playback_commands = playback_parser.add_subparsers(dest="playback_command", required=True)
+    playback_commands.add_parser("check")
+    playback_command_parser = playback_commands.add_parser("command")
+    playback_command_parser.add_argument("player_id")
+    playback_start_parser = playback_commands.add_parser("start")
+    playback_start_parser.add_argument("player_id")
+    playback_commands.add_parser("run")
+
     return parser
 
 
@@ -58,6 +77,8 @@ async def _run(args: argparse.Namespace) -> int:
     state_store = StateStore(args.state_dir)
     if args.command == "run":
         return await _run_daemon(config, state_store)
+    if args.command == "playback":
+        return await _run_playback_command(args, config, state_store)
 
     tv_config = config.get_tv(args.tv_id)
     television = _make_television(tv_config, state_store)
@@ -163,6 +184,161 @@ async def _apply(tv_config: TvConfig, television: Television, state_store: State
     finally:
         with contextlib.suppress(TelevisionError):
             await television.disconnect()
+
+
+async def _run_playback_command(
+    args: argparse.Namespace, config: ApplicationConfig, state_store: StateStore
+) -> int:
+    if args.playback_command == "check":
+        return await _playback_check(config)
+    if args.playback_command == "command":
+        return _playback_command(config, args.player_id)
+    if args.playback_command == "start":
+        return await _playback_start(config, args.player_id)
+    if args.playback_command == "run":
+        return await _playback_run(config, state_store)
+    raise AssertionError(f"Unhandled playback command {args.playback_command}")
+
+
+def _resolve_mpv_binary(mpv_binary: str) -> str | None:
+    return shutil.which(mpv_binary)
+
+
+def _require_playback(config: ApplicationConfig) -> PlaybackConfig | None:
+    if config.playback is None:
+        LOGGER.error("No 'playback' section is configured.")
+        return None
+    return config.playback
+
+
+async def _playback_check(config: ApplicationConfig) -> int:
+    playback = _require_playback(config)
+    if playback is None:
+        return 1
+
+    mpv_path = _resolve_mpv_binary(playback.mpv_binary)
+    if mpv_path is None:
+        print(
+            f"mpv executable {playback.mpv_binary!r} was not found. "
+            "Install mpv or set playback.mpv_binary."
+        )
+        return 1
+    print(f"mpv binary: {mpv_path}")
+
+    try:
+        process = await asyncio.create_subprocess_exec(
+            mpv_path,
+            "--version",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        stdout, _ = await process.communicate()
+        version_line = stdout.decode(errors="replace").splitlines()[0] if stdout else "unknown"
+    except OSError as err:
+        version_line = f"could not run --version: {err}"
+    print(f"mpv version: {version_line}")
+
+    print(
+        f"hwdec: {playback.hwdec}  fullscreen: {playback.fullscreen}  "
+        f"loop: {playback.loop}  audio: {playback.audio}"
+    )
+    print(
+        f"DISPLAY={os.environ.get('DISPLAY', '(unset)')}  "
+        f"WAYLAND_DISPLAY={os.environ.get('WAYLAND_DISPLAY', '(unset)')}"
+    )
+
+    if not playback.players:
+        print("No players configured under 'playback.players'.")
+        return 0
+    for player in playback.players:
+        exists = "yes" if player.media.exists() else "no"
+        if player.screen is not None:
+            screen = f"screen={player.screen}"
+        elif player.screen_name is not None:
+            screen = f"screen_name={player.screen_name}"
+        else:
+            screen = "screen=(default)"
+        tv = f" tv_id={player.tv_id}" if player.tv_id else ""
+        print(f"{player.id}: media={player.media} exists={exists} {screen}{tv}")
+    return 0
+
+
+def _playback_command(config: ApplicationConfig, player_id: str) -> int:
+    playback = _require_playback(config)
+    if playback is None:
+        return 1
+    player = config.get_player(player_id)
+    socket_path = resolve_socket_dir() / f"{player.id}.sock"
+    argv = build_mpv_argv(player, playback, socket_path)
+    print(shlex.join(argv))
+    return 0
+
+
+async def _playback_start(config: ApplicationConfig, player_id: str) -> int:
+    playback = _require_playback(config)
+    if playback is None:
+        return 1
+    player = config.get_player(player_id)
+    if _resolve_mpv_binary(playback.mpv_binary) is None:
+        LOGGER.error(
+            "mpv executable %r was not found. Install mpv or set playback.mpv_binary.",
+            playback.mpv_binary,
+        )
+        return 1
+
+    stop_event = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for signum in (signal.SIGINT, signal.SIGTERM):
+        with contextlib.suppress(NotImplementedError):
+            loop.add_signal_handler(signum, stop_event.set)
+
+    socket_path = resolve_socket_dir() / f"{player.id}.sock"
+    logger = logging.LoggerAdapter(LOGGER, {"player_id": player.id})
+    mpv_player = MpvPlayer(player, playback, socket_path, logger, launcher=default_launcher)
+
+    if not player.media.exists():
+        LOGGER.error("%s: media not found: %s", player.id, player.media)
+        return 1
+
+    try:
+        await mpv_player.start()
+    except OSError as err:
+        LOGGER.error("%s: could not start mpv: %s", player.id, err)
+        return 1
+
+    wait_task = asyncio.create_task(mpv_player.wait())
+    stop_task = asyncio.create_task(stop_event.wait())
+    done, pending = await asyncio.wait({wait_task, stop_task}, return_when=asyncio.FIRST_COMPLETED)
+    for task in pending:
+        task.cancel()
+    await asyncio.gather(*pending, return_exceptions=True)
+    if stop_task in done:
+        await mpv_player.stop()
+        return 0
+    return 0 if wait_task.result() == 0 else 1
+
+
+async def _playback_run(config: ApplicationConfig, state_store: StateStore) -> int:
+    playback = _require_playback(config)
+    if playback is None or not playback.players:
+        LOGGER.error("No 'playback' section with players is configured; nothing to run.")
+        return 1
+
+    stop_event = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for signum in (signal.SIGINT, signal.SIGTERM):
+        with contextlib.suppress(NotImplementedError):
+            loop.add_signal_handler(signum, stop_event.set)
+
+    try:
+        with acquire_controller_lock(
+            state_store.state_dir, name="playback.lock", command="playback run"
+        ):
+            await run_playback(playback, stop_event)
+    except ControllerAlreadyRunningError as err:
+        LOGGER.error("%s", err)
+        return 1
+    return 0
 
 
 def _persist_key(tv_config: TvConfig, television: Television, state_store: StateStore) -> None:

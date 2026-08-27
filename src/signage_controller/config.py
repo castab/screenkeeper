@@ -15,6 +15,9 @@ DEFAULT_RECONCILE_INTERVAL = 30.0
 DEFAULT_POWER_ON_DELAY = 15.0
 DEFAULT_PUSH_INTERVAL = 15.0
 DEFAULT_PROMETHEUS_JOB = "signage_controller"
+DEFAULT_RESTART_DELAY = 2.0
+DEFAULT_HWDEC = "auto"
+DEFAULT_MPV_BINARY = "mpv"
 ENVIRONMENT_VARIABLE_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 LOKI_LABEL_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
@@ -32,6 +35,31 @@ class TvConfig:
     host: str
     desired_input: str
     desired_volume: int
+
+
+@dataclass(frozen=True, slots=True)
+class PlayerConfig:
+    """Configured desired state for one mpv-driven signage player."""
+
+    id: str
+    name: str
+    media: Path
+    tv_id: str | None = None
+    screen: int | None = None
+    screen_name: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class PlaybackConfig:
+    """Optional local mpv playback configuration, independent of TV control."""
+
+    mpv_binary: str = DEFAULT_MPV_BINARY
+    restart_delay: float = DEFAULT_RESTART_DELAY
+    hwdec: str = DEFAULT_HWDEC
+    fullscreen: bool = True
+    loop: bool = True
+    audio: bool = False
+    players: tuple[PlayerConfig, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,6 +98,7 @@ class ApplicationConfig:
     reconcile_interval: float = DEFAULT_RECONCILE_INTERVAL
     power_on_delay: float = DEFAULT_POWER_ON_DELAY
     observability: ObservabilityConfig = ObservabilityConfig()
+    playback: PlaybackConfig | None = None
 
     def get_tv(self, tv_id: str) -> TvConfig:
         """Return a TV by ID or provide the valid IDs in the error."""
@@ -78,6 +107,16 @@ class ApplicationConfig:
                 return tv
         valid_ids = ", ".join(tv.id for tv in self.tvs)
         raise ConfigurationError(f"Unknown TV ID {tv_id!r}. Configured IDs: {valid_ids}")
+
+    def get_player(self, player_id: str) -> PlayerConfig:
+        """Return a configured player by ID or provide the valid IDs in the error."""
+        if self.playback is None or not self.playback.players:
+            raise ConfigurationError("No 'playback' section with players is configured.")
+        for player in self.playback.players:
+            if player.id == player_id:
+                return player
+        valid_ids = ", ".join(player.id for player in self.playback.players)
+        raise ConfigurationError(f"Unknown player ID {player_id!r}. Configured IDs: {valid_ids}")
 
 
 def load_config(path: Path) -> ApplicationConfig:
@@ -117,11 +156,16 @@ def load_config(path: Path) -> ApplicationConfig:
     if duplicates:
         raise ConfigurationError(f"TV IDs must be unique; duplicated IDs: {', '.join(duplicates)}")
 
+    config_dir = path.resolve().parent
+    known_tv_ids = frozenset(tv.id for tv in tvs)
+    playback = _parse_playback(raw.get("playback"), config_dir, known_tv_ids)
+
     return ApplicationConfig(
         tvs=tvs,
         reconcile_interval=reconcile_interval,
         power_on_delay=power_on_delay,
         observability=observability,
+        playback=playback,
     )
 
 
@@ -156,6 +200,122 @@ def _parse_tv(raw: Any, index: int) -> TvConfig:
         )
 
     return TvConfig(desired_volume=volume, **fields)
+
+
+def _parse_bool(value: Any, name: str) -> bool:
+    if not isinstance(value, bool):
+        raise ConfigurationError(f"'{name}' must be a boolean.")
+    return value
+
+
+def _parse_playback(
+    raw: Any, config_dir: Path, known_tv_ids: frozenset[str]
+) -> PlaybackConfig | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ConfigurationError("'playback' must be a mapping.")
+
+    mpv_binary = raw.get("mpv_binary", DEFAULT_MPV_BINARY)
+    if not isinstance(mpv_binary, str) or not mpv_binary.strip():
+        raise ConfigurationError("'playback.mpv_binary' must be a non-empty string.")
+
+    restart_delay = _parse_seconds(
+        raw.get("restart_delay", DEFAULT_RESTART_DELAY), "playback.restart_delay", allow_zero=True
+    )
+
+    hwdec = raw.get("hwdec", DEFAULT_HWDEC)
+    if not isinstance(hwdec, str) or not hwdec.strip():
+        raise ConfigurationError("'playback.hwdec' must be a non-empty string.")
+
+    fullscreen = _parse_bool(raw.get("fullscreen", True), "playback.fullscreen")
+    loop = _parse_bool(raw.get("loop", True), "playback.loop")
+    audio = _parse_bool(raw.get("audio", False), "playback.audio")
+
+    players_raw = raw.get("players", [])
+    if not isinstance(players_raw, list):
+        raise ConfigurationError("'playback.players' must be a list.")
+    players = tuple(
+        _parse_player(entry, index, config_dir, known_tv_ids)
+        for index, entry in enumerate(players_raw, start=1)
+    )
+    ids = [player.id for player in players]
+    duplicates = sorted({player_id for player_id in ids if ids.count(player_id) > 1})
+    if duplicates:
+        raise ConfigurationError(f"Player IDs must be unique; duplicated IDs: {', '.join(duplicates)}")
+
+    return PlaybackConfig(
+        mpv_binary=mpv_binary.strip(),
+        restart_delay=restart_delay,
+        hwdec=hwdec.strip(),
+        fullscreen=fullscreen,
+        loop=loop,
+        audio=audio,
+        players=players,
+    )
+
+
+def _parse_player(
+    raw: Any, index: int, config_dir: Path, known_tv_ids: frozenset[str]
+) -> PlayerConfig:
+    if not isinstance(raw, dict):
+        raise ConfigurationError(f"Player entry {index} must be a mapping.")
+
+    fields: dict[str, str] = {}
+    for field_name in ("id", "name"):
+        value = raw.get(field_name)
+        if not isinstance(value, str) or not value.strip():
+            raise ConfigurationError(
+                f"Player entry {index} field '{field_name}' must be a non-empty string."
+            )
+        fields[field_name] = value.strip()
+
+    media_raw = raw.get("media")
+    if not isinstance(media_raw, str) or not media_raw.strip():
+        raise ConfigurationError(f"Player entry {index} field 'media' must be a non-empty string.")
+    media_path = Path(media_raw.strip())
+    media = media_path if media_path.is_absolute() else (config_dir / media_path).resolve()
+
+    tv_id = raw.get("tv_id")
+    if tv_id is not None:
+        if not isinstance(tv_id, str) or not tv_id.strip():
+            raise ConfigurationError(f"Player entry {index} field 'tv_id' must be a non-empty string.")
+        tv_id = tv_id.strip()
+        if tv_id not in known_tv_ids:
+            valid_ids = ", ".join(sorted(known_tv_ids)) or "(none configured)"
+            raise ConfigurationError(
+                f"Player entry {index} field 'tv_id' {tv_id!r} does not match a configured TV. "
+                f"Configured TV IDs: {valid_ids}"
+            )
+
+    screen = raw.get("screen")
+    if screen is not None:
+        if isinstance(screen, bool) or not isinstance(screen, int) or screen < 0:
+            raise ConfigurationError(
+                f"Player entry {index} field 'screen' must be a non-negative integer."
+            )
+
+    screen_name = raw.get("screen_name")
+    if screen_name is not None:
+        if not isinstance(screen_name, str) or not screen_name.strip():
+            raise ConfigurationError(
+                f"Player entry {index} field 'screen_name' must be a non-empty string."
+            )
+        screen_name = screen_name.strip()
+
+    if screen is not None and screen_name is not None:
+        raise ConfigurationError(
+            f"Player entry {index}: 'screen' and 'screen_name' are mutually exclusive."
+        )
+
+    return PlayerConfig(
+        id=fields["id"],
+        name=fields["name"],
+        media=media,
+        tv_id=tv_id,
+        screen=screen,
+        screen_name=screen_name,
+    )
 
 
 def _parse_observability(raw: Any) -> ObservabilityConfig:

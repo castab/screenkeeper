@@ -25,3 +25,22 @@ tvs:
     host: 192.168.1.50
     desired_input: HDMI_1
     desired_volume: 0
+
+# Optional local mpv signage playback, independent of TV control above.
+# Requires mpv installed on this host; used only by `signage-controller
+# playback ...` commands. See README.md for the full walkthrough.
+# playback:
+#   mpv_binary: mpv
+#   restart_delay: 2
+#   hwdec: auto
+#   fullscreen: true
+#   loop: true
+#   audio: false
+#   players:
+#     - id: dev-menu
+#       name: Development Menu
+#       media: ./media/menu.mp4
+#       tv_id: dev-tv
+#       # Select a display for multi-monitor hosts (mutually exclusive):
+#       # screen: 0
+#       # screen_name: DP-1
