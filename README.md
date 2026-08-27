@@ -364,10 +364,35 @@ SIGNAGE_CONTROLLER_VERSION=0.1.0 docker compose up -d
 commands, for example:
 
 ```bash
-docker run --rm -v "$PWD/config.yaml:/etc/signage-controller/config.yaml:ro" \
+docker run --rm --network host \
+  -v "$PWD/config.yaml:/etc/signage-controller/config.yaml:ro" \
   -v signage-state:/var/lib/signage-controller \
   signage-controller:0.1.0 pair dev-tv
 ```
+
+### Networking
+
+The controller only makes outbound connections to each configured TV's LAN
+`host` address; it never listens for inbound traffic. `docker-compose.yml`
+therefore defaults to `network_mode: host`, giving the container the Linux
+host's real network interface instead of Docker's NAT'd bridge network.
+
+Docker's default bridge network routes outbound traffic through NAT, and
+that is often enough to reach other LAN devices. But some LAN setups and
+devices do not tolerate it well (for example, a firewalled Docker host, or a
+device that expects the connecting client to be on its own subnet), and a
+container stuck behind that NAT will look exactly like an unreachable TV:
+`run` stays alive and logs `TV unavailable ... retrying` indefinitely even
+though the TV is reachable from the Docker host itself. If you see that
+pattern, host networking is the first thing to check.
+
+Host networking is fully supported only on native Linux Docker hosts, which
+matches this project's own target platform (see Requirements above). On
+Docker Desktop for macOS or Windows, comment out `network_mode: host` in
+`docker-compose.yml` (and drop `--network host` from any `docker run`
+command) and use the default bridge network instead; that is normally fine
+for local development against TVs on the same LAN as the Docker Desktop
+host, since it is still plain outbound connectivity.
 
 There is no image registry yet. To move a version to another machine or
 update a running deployment, see "Updating a Deployment" below.

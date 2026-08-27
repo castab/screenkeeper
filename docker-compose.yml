@@ -4,16 +4,21 @@ services:
     container_name: signage-controller
     restart: unless-stopped
     pull_policy: never # no registry yet - image must already exist locally
+    # Host networking gives the container the Linux host's real network
+    # interface instead of Docker's NAT'd bridge network. The controller only
+    # opens outbound connections to TVs by LAN IP and never listens for
+    # inbound traffic, so host mode has no port-conflict downside here, and
+    # it avoids TV-reachability failures some LAN setups hit behind Docker's
+    # default NAT. See "Networking" under Docker in the README before
+    # changing this. Only fully supported on native Linux Docker hosts; on
+    # Docker Desktop (macOS/Windows) comment this out and rely on the
+    # default bridge network instead (fine for local dev/testing).
+    network_mode: host
     env_file:
       - .env
     volumes:
       - ./config.yaml:/etc/signage-controller/config.yaml:ro
       - signage-state:/var/lib/signage-controller
-    # Default bridge networking is sufficient: the controller only makes
-    # outbound TCP/WebSocket connections to TV IPs on the LAN (no mDNS/SSDP
-    # discovery, no inbound ports). Uncomment only if the host's firewall/
-    # network topology blocks outbound bridge traffic to the TVs' LAN segment:
-    # network_mode: host
 
 volumes:
   signage-state:
