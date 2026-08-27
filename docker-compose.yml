@@ -1,0 +1,19 @@
+services:
+  signage-controller:
+    image: signage-controller:${SIGNAGE_CONTROLLER_VERSION:-latest}
+    container_name: signage-controller
+    restart: unless-stopped
+    pull_policy: never # no registry yet - image must already exist locally
+    env_file:
+      - .env
+    volumes:
+      - ./config.yaml:/etc/signage-controller/config.yaml:ro
+      - signage-state:/var/lib/signage-controller
+    # Default bridge networking is sufficient: the controller only makes
+    # outbound TCP/WebSocket connections to TV IPs on the LAN (no mDNS/SSDP
+    # discovery, no inbound ports). Uncomment only if the host's firewall/
+    # network topology blocks outbound bridge traffic to the TVs' LAN segment:
+    # network_mode: host
+
+volumes:
+  signage-state:

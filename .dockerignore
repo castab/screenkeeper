@@ -1,4 +1,6 @@
-.venv/
+.git
+.github
+.venv
 __pycache__/
 *.py[cod]
 .pytest_cache/
@@ -6,4 +8,7 @@ __pycache__/
 config.yaml
 config.yml
 state/
+tests/
+grafana/
 .env
+docker-compose.yml

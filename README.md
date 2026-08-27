@@ -342,6 +342,56 @@ The state directory is created with mode `0700` and the JSON file with mode
 `0600` where supported. Use `--state-dir /var/lib/signage-controller` for a
 later system-service deployment. Do not commit this state file.
 
+## Docker
+
+A multi-stage `Dockerfile` and `docker-compose.yml` are provided for running
+the controller as a container. `config.yaml` and pairing state are never
+baked into the image; they're mounted at runtime. The host's `config.yaml`
+must be readable by uid `10001` inside the container (for example
+`chmod 644 config.yaml`), since the container's non-root user won't match the
+host file owner by default.
+
+Quick start:
+
+```bash
+cp config.example.yaml config.yaml   # edit host / desired_input / desired_volume
+cp .env.example .env                 # optional: LOKI_TOKEN / PROMETHEUS_TOKEN
+docker build --build-arg VERSION=0.1.0 -t signage-controller:0.1.0 .
+SIGNAGE_CONTROLLER_VERSION=0.1.0 docker compose up -d
+```
+
+`docker run --rm <image> <command>` also works for one-off commissioning
+commands, for example:
+
+```bash
+docker run --rm -v "$PWD/config.yaml:/etc/signage-controller/config.yaml:ro" \
+  -v signage-state:/var/lib/signage-controller \
+  signage-controller:0.1.0 pair dev-tv
+```
+
+There is no image registry yet. To move a version to another machine or
+update a running deployment, see "Updating a Deployment" below.
+
+### Updating a Deployment
+
+```bash
+# On the machine you build on:
+docker build --build-arg VERSION=X.Y.Z -t signage-controller:X.Y.Z .
+
+# To move that image to another machine (no registry required):
+docker save signage-controller:X.Y.Z | gzip > signage-controller-X.Y.Z.tar.gz
+scp signage-controller-X.Y.Z.tar.gz target-host:/tmp/
+ssh target-host 'gunzip -c /tmp/signage-controller-X.Y.Z.tar.gz | docker load'
+
+# On the target machine, point the deployment at the new tag:
+export SIGNAGE_CONTROLLER_VERSION=X.Y.Z
+docker compose up -d
+```
+
+Keep previously loaded image tags around (avoid `docker image prune` right
+after an update) so a deployment can be rolled back by re-exporting the old
+`SIGNAGE_CONTROLLER_VERSION` and re-running `docker compose up -d`.
+
 ## Automated Coverage
 
 The suite uses no real TV. It covers:
