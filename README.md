@@ -212,10 +212,11 @@ player keeps looping fullscreen whether or not its associated TV is
 reachable, and `tv_id` on a player is used only for logs/diagnostics, never
 to gate playback.
 
-`mpv` is a **host-native** component. It is never added to the Docker image
-and never given access to `/dev/dri`, X11/Wayland sockets, or DRM devices
-inside a container — see "Docker" below. Running TV-only commands (`pair`,
-`status`, `inputs`, `apply`, `run`) never requires `mpv` to be installed.
+`mpv` runs directly on the host alongside the controller: both the TV-control
+commands and the playback commands are run by the same machine, and `mpv`
+needs direct access to that host's graphical/display session. Running TV-only
+commands (`pair`, `status`, `inputs`, `apply`, `run`) never requires `mpv` to
+be installed.
 
 ### Install
 
@@ -578,90 +579,19 @@ The state directory is created with mode `0700` and the JSON file with mode
 `0600` where supported. Use `--state-dir /var/lib/signage-controller` for a
 later system-service deployment. Do not commit this state file.
 
-## Docker
+## Deployment Shape
 
-A multi-stage `Dockerfile` and `docker-compose.yml` are provided for running
-the TV-control side of the controller as a container. `config.yaml` and
-pairing state are never baked into the image; they're mounted at runtime.
-The host's `config.yaml` must be readable by uid `10001` inside the
-container (for example `chmod 644 config.yaml`), since the container's
-non-root user won't match the host file owner by default.
+Screenkeeper is not containerized. The TV controller and the mpv players run
+as two host-native processes on the same Linux machine — `signage-controller
+run` and `signage-controller playback run` — reading the same `config.yaml`
+and sharing the same state directory through independent locks. mpv needs
+direct access to that host's graphical session, and the controller only makes
+outbound LAN connections to each TV (it never listens for inbound traffic),
+so there is nothing a split or containerized deployment would buy here.
 
-**`mpv` playback is intentionally unavailable inside this container.** The
-image does not include `mpv`, and nothing mounts `/dev/dri`, X11/Wayland
-sockets, or DRM devices into it — mpv needs direct access to the host's
-graphical/display session, which a container does not provide without
-compromising isolation. Run `playback check`/`command`/`start`/`run`
-directly on the bare Linux host (see "mpv Playback" above); the containerized
-`signage-controller` image is for TV-only commands. A `config.yaml` with a
-`playback:` section is still fine to mount into the container — the
-container simply never runs the `playback` commands that would read it.
-
-Quick start:
-
-```bash
-cp config.example.yaml config.yaml   # edit host / desired_input / desired_volume
-cp .env.example .env                 # optional: LOKI_TOKEN / PROMETHEUS_TOKEN
-docker build --build-arg VERSION=0.1.0 -t signage-controller:0.1.0 .
-SIGNAGE_CONTROLLER_VERSION=0.1.0 docker compose up -d
-```
-
-`docker run --rm <image> <command>` also works for one-off commissioning
-commands, for example:
-
-```bash
-docker run --rm --network host \
-  -v "$PWD/config.yaml:/etc/signage-controller/config.yaml:ro" \
-  -v signage-state:/var/lib/signage-controller \
-  signage-controller:0.1.0 pair dev-tv
-```
-
-### Networking
-
-The controller only makes outbound connections to each configured TV's LAN
-`host` address; it never listens for inbound traffic. `docker-compose.yml`
-therefore defaults to `network_mode: host`, giving the container the Linux
-host's real network interface instead of Docker's NAT'd bridge network.
-
-Docker's default bridge network routes outbound traffic through NAT, and
-that is often enough to reach other LAN devices. But some LAN setups and
-devices do not tolerate it well (for example, a firewalled Docker host, or a
-device that expects the connecting client to be on its own subnet), and a
-container stuck behind that NAT will look exactly like an unreachable TV:
-`run` stays alive and logs `TV unavailable ... retrying` indefinitely even
-though the TV is reachable from the Docker host itself. If you see that
-pattern, host networking is the first thing to check.
-
-Host networking is fully supported only on native Linux Docker hosts, which
-matches this project's own target platform (see Requirements above). On
-Docker Desktop for macOS or Windows, comment out `network_mode: host` in
-`docker-compose.yml` (and drop `--network host` from any `docker run`
-command) and use the default bridge network instead; that is normally fine
-for local development against TVs on the same LAN as the Docker Desktop
-host, since it is still plain outbound connectivity.
-
-There is no image registry yet. To move a version to another machine or
-update a running deployment, see "Updating a Deployment" below.
-
-### Updating a Deployment
-
-```bash
-# On the machine you build on:
-docker build --build-arg VERSION=X.Y.Z -t signage-controller:X.Y.Z .
-
-# To move that image to another machine (no registry required):
-docker save signage-controller:X.Y.Z | gzip > signage-controller-X.Y.Z.tar.gz
-scp signage-controller-X.Y.Z.tar.gz target-host:/tmp/
-ssh target-host 'gunzip -c /tmp/signage-controller-X.Y.Z.tar.gz | docker load'
-
-# On the target machine, point the deployment at the new tag:
-export SIGNAGE_CONTROLLER_VERSION=X.Y.Z
-docker compose up -d
-```
-
-Keep previously loaded image tags around (avoid `docker image prune` right
-after an update) so a deployment can be rolled back by re-exporting the old
-`SIGNAGE_CONTROLLER_VERSION` and re-running `docker compose up -d`.
+Both processes are ordinary foreground commands; a later deployment phase can
+supervise them with two systemd units alongside the physical-display work
+listed under "Real-Hardware Validation" below.
 
 ## Automated Coverage
 

@@ -96,10 +96,10 @@ releases.
   connection state, and never make TV convergence depend on playback state.
   Do not write `if tv_online: start_player() else: stop_player()` or its
   equivalent — a TV being off is normal; the paired player keeps looping.
-- mpv stays a host-native component. Never add mpv to the Docker image, and
-  never mount `/dev/dri`, X11/Wayland sockets, or DRM devices into the
-  container. The existing network-only TV-control Docker workflow must keep
-  working unchanged when `playback:` is not configured.
+- Both subsystems are host-native. The project is deliberately not
+  containerized: TV control and mpv playback run as two processes on the same
+  Linux host. Do not reintroduce a Dockerfile, Compose file, or any other
+  container packaging without explicit authorization.
 - Playback configuration stays generic. Never hardcode Lenovo-specific
   connector names, resolutions, or refresh rates; `screen`/`screen_name`
   values are always operator-supplied.
