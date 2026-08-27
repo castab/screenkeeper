@@ -241,11 +241,19 @@ def _parse_prometheus(raw: Any) -> PrometheusConfig | None:
 
 def _parse_url(value: Any, name: str) -> str:
     if not isinstance(value, str) or not value.strip():
-        raise ConfigurationError(f"'{name}' must be a non-empty HTTP(S) URL.")
+        raise ConfigurationError(f"'{name}' must be a non-empty HTTPS URL.")
     value = value.strip()
     parsed = urlsplit(value)
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        raise ConfigurationError(f"'{name}' must be a non-empty HTTP(S) URL.")
+    try:
+        port = parsed.port
+    except ValueError as err:
+        raise ConfigurationError(f"'{name}' must be a valid HTTPS URL.") from err
+    if (
+        parsed.scheme != "https"
+        or not parsed.hostname
+        or (port is not None and not 1 <= port <= 65535)
+    ):
+        raise ConfigurationError(f"'{name}' must be a non-empty HTTPS URL.")
     return value
 
 

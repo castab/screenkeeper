@@ -130,7 +130,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "sum(signage_controller_tv_connection_up{tv_id=~\"$tv_id\"})",
+          "expr": "sum(signage_controller_tv_connection_up{instance=~\"$instance\", tv_id=~\"$tv_id\"})",
           "instant": true,
           "legendFormat": "",
           "range": false,
@@ -192,7 +192,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "sum(signage_controller_tv_power_on{tv_id=~\"$tv_id\"})",
+          "expr": "sum(signage_controller_tv_power_on{instance=~\"$instance\", tv_id=~\"$tv_id\"})",
           "instant": true,
           "legendFormat": "",
           "range": false,
@@ -259,7 +259,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "max(time() - signage_controller_tv_status_updated_timestamp_seconds{tv_id=~\"$tv_id\"})",
+          "expr": "max(time() - signage_controller_tv_status_updated_timestamp_seconds{instance=~\"$instance\", tv_id=~\"$tv_id\"})",
           "instant": true,
           "legendFormat": "",
           "range": false,
@@ -321,7 +321,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "sum(1 - signage_controller_tv_connection_up{tv_id=~\"$tv_id\"})",
+          "expr": "sum(1 - signage_controller_tv_connection_up{instance=~\"$instance\", tv_id=~\"$tv_id\"})",
           "instant": true,
           "legendFormat": "",
           "range": false,
@@ -386,7 +386,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "signage_controller_tv_connection_up{tv_id=~\"$tv_id\"}",
+          "expr": "signage_controller_tv_connection_up{instance=~\"$instance\", tv_id=~\"$tv_id\"}",
           "legendFormat": "{{tv_id}}",
           "range": true,
           "refId": "A"
@@ -450,7 +450,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "signage_controller_tv_power_on{tv_id=~\"$tv_id\"}",
+          "expr": "signage_controller_tv_power_on{instance=~\"$instance\", tv_id=~\"$tv_id\"}",
           "legendFormat": "{{tv_id}}",
           "range": true,
           "refId": "A"
@@ -515,7 +515,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "signage_controller_tv_volume{tv_id=~\"$tv_id\"}",
+          "expr": "signage_controller_tv_volume{instance=~\"$instance\", tv_id=~\"$tv_id\"}",
           "legendFormat": "{{tv_id}}",
           "range": true,
           "refId": "A"
@@ -559,7 +559,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "signage_controller_tv_input{tv_id=~\"$tv_id\"}",
+          "expr": "signage_controller_tv_input{instance=~\"$instance\", tv_id=~\"$tv_id\"}",
           "format": "table",
           "instant": true,
           "refId": "A"
@@ -628,7 +628,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "{service=\"signage-controller\", tv_id=~\"$tv_id\"}",
+          "expr": "{service=\"signage-controller\", instance=~\"$instance\", tv_id=~\"$tv_id\"}",
           "queryType": "range",
           "refId": "A"
         }
@@ -657,7 +657,35 @@
           "type": "prometheus",
           "uid": "${DS_PROMETHEUS}"
         },
-        "definition": "label_values(signage_controller_tv_connection_up, tv_id)",
+        "definition": "label_values(signage_controller_tv_connection_up, instance)",
+        "hide": 0,
+        "includeAll": true,
+        "label": "Controller",
+        "multi": true,
+        "name": "instance",
+        "options": [],
+        "query": {
+          "query": "label_values(signage_controller_tv_connection_up, instance)",
+          "refId": "PrometheusVariableQueryEditor-VariableQuery"
+        },
+        "refresh": 1,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "allValue": ".+",
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${DS_PROMETHEUS}"
+        },
+        "definition": "label_values(signage_controller_tv_connection_up{instance=~\"$instance\"}, tv_id)",
         "hide": 0,
         "includeAll": true,
         "label": "TV",
@@ -665,7 +693,7 @@
         "name": "tv_id",
         "options": [],
         "query": {
-          "query": "label_values(signage_controller_tv_connection_up, tv_id)",
+          "query": "label_values(signage_controller_tv_connection_up{instance=~\"$instance\"}, tv_id)",
           "refId": "PrometheusVariableQueryEditor-VariableQuery"
         },
         "refresh": 1,

@@ -190,7 +190,14 @@ async def _run_daemon(config: ApplicationConfig, state_store: StateStore) -> int
     runtime_started = False
     try:
         if config.observability.loki is not None:
-            loki_handler = LokiHandler(config.observability.loki)
+            loki_handler = LokiHandler(
+                config.observability.loki,
+                instance=(
+                    config.observability.prometheus.instance
+                    if config.observability.prometheus is not None
+                    else None
+                ),
+            )
             root_logger.addHandler(loki_handler)
         if config.observability.prometheus is not None:
             reporter = PrometheusStatusReporter(

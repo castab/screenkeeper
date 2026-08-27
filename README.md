@@ -200,18 +200,22 @@ local and do not publish metrics.
 
 Set `observability.loki.url` to Loki's `/loki/api/v1/push` endpoint and provide
 the name of an environment variable containing its bearer token in
-`bearer_token_env`. For the example configuration, set the token before starting
-the service:
+`bearer_token_env`. Telemetry endpoints must use HTTPS so bearer tokens are not
+sent in clear text. Enter tokens without placing them in shell history:
 
 ```bash
-export LOKI_TOKEN='replace-with-loki-token'
-signage-controller run
+read -rsp "Loki token: " LOKI_TOKEN; printf '\n'
+export LOKI_TOKEN
 ```
 
 The token is never written to logs. Loki shipping uses a bounded background
 queue, batches records, and retries delivery without blocking television
 control. Records include `service="signage-controller"`, the host `instance`,
 the log `level`, optional configured `labels`, and `tv_id` for controller logs.
+When Prometheus Remote Write is also configured, its `instance` value is used
+for Loki too, so dashboard queries identify one controller consistently. Loki
+receives only this application's logs; dependency protocol diagnostics are not
+shipped even with `--debug`.
 If delivery remains unavailable, the controller continues running and writes a
 local diagnostic to standard error.
 
@@ -222,7 +226,8 @@ remote-write URL and set `bearer_token_env` to the name of its bearer-token
 environment variable:
 
 ```bash
-export PROMETHEUS_TOKEN='replace-with-prometheus-token'
+read -rsp "Prometheus token: " PROMETHEUS_TOKEN; printf '\n'
+export PROMETHEUS_TOKEN
 signage-controller run
 ```
 
@@ -258,8 +263,9 @@ observation. Remote-write delivery errors are logged and do not stop TV control.
 
 `grafana/signage-controller-dashboard.json` is an importable dashboard for
 these metrics and the Loki logs. Grafana prompts for the Prometheus and Loki
-datasources during import; it includes a TV selector, current-state summary,
-connection and power history, volume history, current input, and TV-scoped logs.
+datasources during import; it includes controller and TV selectors,
+current-state summary, connection and power history, volume history, current
+input, and TV-scoped logs.
 
 ## Logs and Recovery
 
@@ -311,11 +317,12 @@ reconciliation loop remains the fallback if a state update is missed.
 Use `--debug` before the command for protocol diagnostics:
 
 ```bash
-signage-controller --debug status dev-tv
+signage-controller --debug run
 ```
 
 Debug output can include detailed TV and protocol information, so leave it off
-in normal operation.
+in normal operation. Loki ships the controller's own debug records but excludes
+dependency protocol logs.
 
 ## Pairing State
 

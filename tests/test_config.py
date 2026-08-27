@@ -111,3 +111,24 @@ tvs:
 
     with pytest.raises(ConfigurationError, match="reserved"):
         load_config(path)
+
+
+def test_load_config_rejects_cleartext_telemetry_url(tmp_path) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        """observability:
+  loki:
+    url: http://loki.example.com/loki/api/v1/push
+    bearer_token_env: LOKI_TOKEN
+tvs:
+  - id: left
+    name: Left Menu
+    host: 192.168.50.21
+    desired_input: HDMI_1
+    desired_volume: 0
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigurationError, match="HTTPS"):
+        load_config(path)

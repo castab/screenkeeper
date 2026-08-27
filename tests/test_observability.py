@@ -30,11 +30,11 @@ def test_loki_handler_sends_bearer_authenticated_labeled_payload(monkeypatch) ->
         def __exit__(self, *args) -> None:
             return None
 
-    def fake_urlopen(request, timeout: float):
+    def fake_open_url(request, timeout: float):
         requests.append((request, timeout))
         return Response()
 
-    monkeypatch.setattr("signage_controller.observability.urlopen", fake_urlopen)
+    monkeypatch.setattr("signage_controller.observability._open_url", fake_open_url)
     handler = LokiHandler(
         LokiConfig(
             url="https://loki.example.com/loki/api/v1/push",
@@ -101,6 +101,23 @@ def test_loki_handler_adds_record_metadata(monkeypatch) -> None:
     }
 
 
+def test_loki_handler_excludes_dependency_logs(monkeypatch) -> None:
+    monkeypatch.setenv("LOKI_TOKEN", "loki-secret")
+    handler = LokiHandler(
+        LokiConfig(
+            url="https://loki.example.com/loki/api/v1/push",
+            bearer_token_env="LOKI_TOKEN",
+        )
+    )
+    try:
+        assert not handler.filter(logging.LogRecord("aiowebostv", logging.DEBUG, __file__, 1, "x", (), None))
+        assert handler.filter(
+            logging.LogRecord("signage_controller.controller", logging.DEBUG, __file__, 1, "x", (), None)
+        )
+    finally:
+        handler.close()
+
+
 def test_prometheus_reporter_retains_last_status_when_unavailable(monkeypatch) -> None:
     monkeypatch.setenv("PROMETHEUS_TOKEN", "prometheus-secret")
     reporter = PrometheusStatusReporter(
@@ -162,11 +179,11 @@ def test_prometheus_reporter_replaces_input_and_uses_bearer_token(monkeypatch) -
         def __exit__(self, *args) -> None:
             return None
 
-    def fake_urlopen(request, timeout: float):
+    def fake_open_url(request, timeout: float):
         captured.append((request, timeout))
         return Response()
 
-    monkeypatch.setattr("signage_controller.observability.urlopen", fake_urlopen)
+    monkeypatch.setattr("signage_controller.observability._open_url", fake_open_url)
     samples = reporter._samples()
     reporter._send(snappy.compress(_encode_remote_write(samples)))
 

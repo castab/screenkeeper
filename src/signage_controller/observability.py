@@ -16,7 +16,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Protocol
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 import snappy
 
@@ -36,6 +36,27 @@ STALE_NAN_BITS = 0x7FF0000000000002
 
 class ObservabilityError(ValueError):
     """Raised when configured telemetry cannot be initialized safely."""
+
+
+class _NoRedirectHandler(HTTPRedirectHandler):
+    """Reject redirects so bearer tokens and request bodies stay at the configured host."""
+
+    def redirect_request(self, *args: object, **kwargs: object) -> None:
+        return None
+
+
+_NO_REDIRECT_OPENER = build_opener(_NoRedirectHandler())
+
+
+def _open_url(request: Request, timeout: float):
+    return _NO_REDIRECT_OPENER.open(request, timeout=timeout)
+
+
+class _ApplicationLogFilter(logging.Filter):
+    """Keep dependency protocol logs out of the external Loki stream."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return record.name.startswith("signage_controller")
 
 
 class StatusReporter(Protocol):
@@ -79,6 +100,7 @@ class LokiHandler(logging.Handler):
         self._closed = threading.Event()
         self._worker = threading.Thread(target=self._run, name="loki-log-sender", daemon=True)
         self.setFormatter(logging.Formatter("%(message)s"))
+        self.addFilter(_ApplicationLogFilter())
         self._worker.start()
 
     def emit(self, record: logging.LogRecord) -> None:
@@ -162,13 +184,19 @@ class LokiHandler(logging.Handler):
                     },
                     method="POST",
                 )
-                with urlopen(request, timeout=REQUEST_TIMEOUT):
+                with _open_url(request, timeout=REQUEST_TIMEOUT):
                     return
-            except (HTTPError, OSError, TimeoutError, URLError) as err:
-                if attempt == 2:
-                    self._diagnostic(f"Loki log delivery failed: {err}")
+            except HTTPError as err:
+                if err.code != 429 and err.code < 500:
+                    self._diagnostic(f"Loki log delivery failed: HTTP {err.code}")
                     return
-                time.sleep(0.25 * (attempt + 1))
+                delivery_error: Exception = err
+            except (OSError, TimeoutError, URLError) as err:
+                delivery_error = err
+            if attempt == 2:
+                self._diagnostic(f"Loki log delivery failed: {delivery_error}")
+                return
+            time.sleep(0.25 * (attempt + 1))
 
     @staticmethod
     def _diagnostic(message: str) -> None:
@@ -352,10 +380,10 @@ class PrometheusStatusReporter:
         )
         for attempt in range(3):
             try:
-                with urlopen(request, timeout=REQUEST_TIMEOUT):
+                with _open_url(request, timeout=REQUEST_TIMEOUT):
                     return
             except HTTPError as err:
-                if 400 <= err.code < 500 and err.code != 429:
+                if err.code < 400 or 400 <= err.code < 500 and err.code != 429:
                     raise RuntimeError(f"remote-write receiver returned HTTP {err.code}") from err
                 last_error: Exception = err
             except (OSError, TimeoutError, URLError) as err:
