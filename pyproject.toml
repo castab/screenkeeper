@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "signage-controller"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Local desired-state controller for LG webOS signage televisions and mpv signage playback"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -28,5 +28,25 @@ signage-controller = "signage_controller.cli:main"
 asyncio_mode = "auto"
 testpaths = ["tests"]
 
+[tool.hatch.version]
+# Single source of truth: the release tag, the built package, and the version
+# an installed copy reports through `--version` must never disagree, because
+# `signage-controller upgrade` compares them.
+path = "src/signage_controller/__init__.py"
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/signage_controller"]
+
+[tool.hatch.build.targets.sdist]
+# `upgrade` installs the sdist asset published with each release, so the sdist
+# must carry everything needed to build and verify a host-native install.
+include = [
+  "src/signage_controller",
+  "tests",
+  "packaging",
+  "scripts",
+  "README.md",
+  "AGENTS.md",
+  "config.example.yaml",
+  "pyproject.toml",
+]

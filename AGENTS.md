@@ -46,6 +46,28 @@ The definitive automated check is:
 .venv/bin/pytest
 ```
 
+### Working From Windows
+
+This project cannot be tested on Windows: `runtime_lock.py` and `updater.py`
+use `fcntl`, mpv IPC uses Unix-domain sockets, and the installer and units are
+Linux-native. `import signage_controller.cli` itself fails on Windows.
+
+When the working directory is a Windows path, run everything through WSL
+rather than reporting the suite as unrunnable:
+
+```bash
+wsl -d Ubuntu -- bash -lc 'cd /mnt/<drive>/path/to/screenkeeper && ~/screenkeeper-venv/bin/pytest -q'
+```
+
+- Keep the venv on the Linux filesystem (`$HOME`), not under `/mnt/`. Unix
+  permissions and speed both suffer on a Windows drive, and the state-store
+  and socket tests depend on those permissions.
+- `python3 -m venv` needs the `python3-venv` package on Debian and Ubuntu.
+  Without it the failure is an opaque `Failing command: .../bin/python3`.
+- Never convert `scripts/install.sh` or `packaging/*.service` to CRLF. The
+  `.gitattributes` rules pinning them to LF are load-bearing; bash and systemd
+  both reject CRLF.
+
 Also run syntax and whitespace checks after code changes:
 
 ```bash
@@ -65,8 +87,19 @@ adapter changes.
 - `tv/lg_webos.py`: the only layer that depends on `aiowebostv`.
 - `controller.py`: desired-state convergence, retry lifecycle, delayed
   reconciliation, and state interpretation.
-- `cli.py`: `pair`, `status`, `inputs`, `apply`, `run`, and the `playback`
-  command group (`check`, `command`, `start`, `run`).
+- `cli.py`: `pair`, `status`, `inputs`, `apply`, `run`, the `playback`
+  command group (`check`, `command`, `start`, `run`), and the installation
+  commands (`upgrade`, `rollback`, `versions`). The installation commands are
+  dispatched before `load_config` and must stay that way: an upgrade has to
+  work on a host whose `config.yaml` is missing or broken.
+- `updater.py`: release resolution, checksum verification, versioned venv
+  builds, atomic activation/rollback, pruning, and the update lock. Network
+  access and subprocess execution are injected (`opener`, `runner`) so tests
+  never touch GitHub or build a real venv.
+- `scripts/install.sh`: first-time appliance install. Creates the same layout
+  `updater.py` maintains afterwards.
+- `packaging/*.service`, `packaging/*.timer`: systemd user units, templated
+  with `@INSTALL_ROOT@`, `@CONFIG_DIR@`, and `@STATE_DIR@` by the installer.
 - `runtime_lock.py`: prevents concurrent processes sharing one lock name in
   one state directory. TV `run` and `playback run` use separate lock names
   (`controller.lock` / `playback.lock`) so they can run concurrently, since
@@ -108,7 +141,11 @@ releases.
   three-monitor mode-setting remain deferred pending verification on real
   Lenovo ThinkCentre M710q hardware. Do not add that work without explicit
   authorization, matching how mpv playback itself required this file's prior
-  authorization before Phase 2 began.
+  authorization before Phase 2 began. Scripted installation, systemd user-unit
+  supervision, and self-update are authorized and implemented; the graphical
+  session those units depend on is still part of the deferred work, which is
+  why `screenkeeper-playback.service` binds to `graphical-session.target`
+  instead of provisioning one.
 - Never mute the TV as a substitute for setting `desired_volume: 0`.
 - Desired-state changes are idempotent: read actual input and volume, then send
   only the command needed for a mismatch.
@@ -124,6 +161,25 @@ releases.
   callbacks as power events.
 - Preserve the single-instance runtime lock. Do not instruct users to stop
   `run` with Ctrl-Z; use Ctrl-C for normal shutdown.
+- An upgrade must never mutate the installation it is running from. Build each
+  version under its own `versions/<version>/` directory, smoke-test it there,
+  and only then repoint `current`. A failed build leaves the running version
+  active and untouched.
+- Build every venv at its final path. Never build in a staging directory and
+  rename it into place: pip bakes absolute paths into console-script shebangs
+  and `pyvenv.cfg`, so a relocated venv breaks the moment it is activated.
+  This applies to `updater.py` and `scripts/install.sh` alike.
+- Keep `config.yaml` and the state directory outside the versioned install
+  tree, so upgrades and rollbacks cannot touch configuration or pairing keys.
+- Never delete the active version when pruning, and keep rollback working by
+  retaining at least one prior version.
+- The unattended-upgrade timer ships installed but disabled. Do not enable it
+  by default; an upgrade restarts playback.
+- `__version__` in `src/signage_controller/__init__.py` is the single source of
+  truth for the version. `pyproject.toml` reads it dynamically. Do not
+  reintroduce a hardcoded `version =` in `pyproject.toml`, and do not let a
+  release tag disagree with it — `upgrade` rejects a build whose reported
+  version does not match the release.
 
 ## State And Security
 
@@ -145,6 +201,10 @@ releases.
   explicitly requested that external action — both launch a real mpv process
   against the host's graphical session. `playback check` and
   `playback command` are diagnostic-only and never launch mpv.
+- Do not run `scripts/install.sh` without an explicit request: it requires
+  root, creates a system account, and writes outside the repository.
+  `signage-controller upgrade` mutates a real installation and restarts units,
+  so treat it the same way. `upgrade --check` and `versions` are read-only.
 
 ## Documentation Expectations
 
@@ -152,6 +212,9 @@ releases.
   behavior, timing, logging, or commissioning steps change — this applies to
   `playback:` keys and playback CLI commands exactly as it does to `tvs:`
   keys and TV commands.
+- Keep `README.md`, `scripts/install.sh`, and `packaging/` consistent when the
+  install layout, unit names, or update flow change. The installer and
+  `updater.py` maintain the same tree, so a change to one is a change to both.
 - Keep the README one-TV walkthrough and one-player mpv walkthrough accurate
   and executable from a clean checkout.
 - Document actual command IDs as TV-specific values discovered through

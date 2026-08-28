@@ -1,0 +1,23 @@
+[Unit]
+Description=Screenkeeper mpv signage playback
+Documentation=https://github.com/castab/screenkeeper
+# mpv needs this user's graphical session, so the unit is bound to it rather
+# than started at boot. It is intentionally independent of screenkeeper.service:
+# a TV being off must never stop playback, and vice versa.
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=@INSTALL_ROOT@/current/venv/bin/signage-controller \
+    --config @CONFIG_DIR@/config.yaml \
+    --state-dir @STATE_DIR@ \
+    playback run
+Restart=always
+RestartSec=5
+KillSignal=SIGINT
+TimeoutStopSec=30
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=graphical-session.target

@@ -12,6 +12,7 @@ import shutil
 import signal
 from pathlib import Path
 
+from . import __version__
 from .config import ApplicationConfig, ConfigurationError, PlaybackConfig, TvConfig, load_config
 from .controller import DesiredInputError, converge, run_all
 from .observability import LokiHandler, ObservabilityError, PrometheusStatusReporter
@@ -21,9 +22,28 @@ from .runtime_lock import ControllerAlreadyRunningError, acquire_controller_lock
 from .state_store import StateStore, StateStoreError
 from .tv.base import Television, TelevisionError
 from .tv.lg_webos import LgWebOsTelevision
+from .updater import (
+    DEFAULT_KEEP_VERSIONS,
+    UPDATE_AVAILABLE_EXIT_CODE,
+    InstallLayout,
+    UpdateError,
+    activate_version,
+    default_repository,
+    install_release,
+    normalize_version,
+    prune_versions,
+    resolve_release,
+    restart_services,
+    update_lock,
+    version_key,
+)
 
 
 LOGGER = logging.getLogger(__name__)
+
+# Commands that manage the installation itself. They must not load config.yaml:
+# an upgrade has to work on a host whose configuration is missing or broken.
+UPDATE_COMMANDS = frozenset({"upgrade", "rollback", "versions"})
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -34,6 +54,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--config", type=Path, default=Path("config.yaml"), help="YAML configuration path")
     parser.add_argument("--state-dir", type=Path, help="Runtime state directory")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     commands = parser.add_subparsers(dest="command", required=True)
     for command in ("pair", "status", "inputs", "apply"):
         command_parser = commands.add_parser(command)
@@ -51,6 +72,56 @@ def build_parser() -> argparse.ArgumentParser:
     playback_start_parser.add_argument("player_id")
     playback_commands.add_parser("run")
 
+    upgrade_parser = commands.add_parser(
+        "upgrade", help="Install and activate the latest published release."
+    )
+    upgrade_parser.add_argument(
+        "--check",
+        action="store_true",
+        help=(
+            "Report whether a newer release exists without installing it. "
+            f"Exits {UPDATE_AVAILABLE_EXIT_CODE} when an update is available."
+        ),
+    )
+    upgrade_parser.add_argument(
+        "--to", dest="target_version", help="Install this version instead of the latest release."
+    )
+    upgrade_parser.add_argument(
+        "--repository", default=default_repository(), help="GitHub repository publishing releases."
+    )
+    upgrade_parser.add_argument(
+        "--force", action="store_true", help="Rebuild the version directory if it already exists."
+    )
+    upgrade_parser.add_argument(
+        "--allow-downgrade", action="store_true", help="Permit installing an older version."
+    )
+    upgrade_parser.add_argument(
+        "--require-checksum",
+        action="store_true",
+        help="Fail when the release publishes no SHA256SUMS entry for its archive.",
+    )
+    upgrade_parser.add_argument(
+        "--no-restart", action="store_true", help="Activate the new version without restarting units."
+    )
+    upgrade_parser.add_argument(
+        "--keep",
+        type=int,
+        default=DEFAULT_KEEP_VERSIONS,
+        help="Number of installed versions to retain (default: %(default)s).",
+    )
+
+    rollback_parser = commands.add_parser(
+        "rollback", help="Reactivate the previously installed version."
+    )
+    rollback_parser.add_argument(
+        "--to", dest="target_version", help="Activate this installed version instead."
+    )
+    rollback_parser.add_argument(
+        "--no-restart", action="store_true", help="Activate without restarting units."
+    )
+
+    commands.add_parser("versions", help="List installed versions and the active one.")
+
     return parser
 
 
@@ -63,8 +134,11 @@ def main() -> None:
         datefmt="%Y-%m-%d %H:%M:%S",
     )
     try:
-        exit_code = asyncio.run(_run(args))
-    except (ConfigurationError, ObservabilityError, StateStoreError) as err:
+        if args.command in UPDATE_COMMANDS:
+            exit_code = _run_update_command(args)
+        else:
+            exit_code = asyncio.run(_run(args))
+    except (ConfigurationError, ObservabilityError, StateStoreError, UpdateError) as err:
         LOGGER.error("%s", err)
         exit_code = 2
     except KeyboardInterrupt:
@@ -338,6 +412,116 @@ async def _playback_run(config: ApplicationConfig, state_store: StateStore) -> i
     except ControllerAlreadyRunningError as err:
         LOGGER.error("%s", err)
         return 1
+    return 0
+
+
+def _run_update_command(args: argparse.Namespace) -> int:
+    layout = InstallLayout.from_environment()
+    if args.command == "versions":
+        return _versions(layout)
+    if args.command == "upgrade":
+        return _upgrade(args, layout)
+    if args.command == "rollback":
+        return _rollback(args, layout)
+    raise AssertionError(f"Unhandled update command {args.command}")
+
+
+def _require_managed_install(layout: InstallLayout) -> None:
+    """Refuse to manage an installation this command did not create."""
+    if not layout.root.is_dir():
+        raise UpdateError(
+            f"{layout.root} is not a managed installation, so there is nothing to upgrade. "
+            "Install with scripts/install.sh, or point SCREENKEEPER_INSTALL_ROOT at an "
+            "existing install tree. A development checkout is upgraded with git instead."
+        )
+
+
+def _versions(layout: InstallLayout) -> int:
+    print(f"Running version: {__version__}")
+    print(f"Install root: {layout.root}")
+    installed = layout.installed_versions()
+    if not installed:
+        print("Installed versions: (none — this is not a managed installation)")
+        return 0
+    current = layout.current_version()
+    print("Installed versions:")
+    for version in reversed(installed):
+        print(f"  {version}{'  (active)' if version == current else ''}")
+    return 0
+
+
+def _upgrade(args: argparse.Namespace, layout: InstallLayout) -> int:
+    release = resolve_release(args.repository, args.target_version)
+    running = version_key(__version__)
+    target = version_key(release.version)
+
+    if target < running and not args.allow_downgrade:
+        raise UpdateError(
+            f"Release {release.version} is older than the running version {__version__}. "
+            "Pass --allow-downgrade to install it anyway."
+        )
+    if target == running and not args.force:
+        print(f"signage-controller {__version__} is already the newest release.")
+        return 0
+    if args.check:
+        print(f"Update available: {__version__} -> {release.version}")
+        return UPDATE_AVAILABLE_EXIT_CODE
+
+    _require_managed_install(layout)
+    with update_lock(layout):
+        install_release(
+            release, layout, require_checksum=args.require_checksum, force=args.force
+        )
+        activate_version(layout, release.version)
+        print(f"Activated signage-controller {release.version}.")
+        removed = prune_versions(layout, keep=args.keep)
+        if removed:
+            print(f"Removed older versions: {', '.join(removed)}")
+        return _finish_activation(release.version, no_restart=args.no_restart)
+
+
+def _rollback(args: argparse.Namespace, layout: InstallLayout) -> int:
+    _require_managed_install(layout)
+    installed = layout.installed_versions()
+    current = layout.current_version()
+
+    if args.target_version is not None:
+        target = normalize_version(args.target_version)
+        if target not in installed:
+            available = ", ".join(reversed(installed)) or "(none)"
+            raise UpdateError(f"Version {target} is not installed. Installed versions: {available}")
+    else:
+        candidates = [version for version in installed if version != current]
+        if not candidates:
+            raise UpdateError(
+                "No other version is installed to roll back to. "
+                f"Installed versions: {', '.join(installed) or '(none)'}"
+            )
+        target = candidates[-1]
+
+    if target == current:
+        print(f"signage-controller {target} is already active.")
+        return 0
+
+    with update_lock(layout):
+        activate_version(layout, target)
+        print(f"Rolled back to signage-controller {target}.")
+        return _finish_activation(target, no_restart=args.no_restart)
+
+
+def _finish_activation(version: str, *, no_restart: bool) -> int:
+    if no_restart:
+        print("Units were not restarted; they keep running the previous code until restarted.")
+        return 0
+    failed = restart_services()
+    if failed:
+        commands = " ".join(f"systemctl --user restart {unit};" for unit in failed).rstrip(";")
+        LOGGER.warning(
+            "Version %s is active but these units did not restart: %s. Restart them with: %s",
+            version,
+            ", ".join(failed),
+            commands,
+        )
     return 0
 
 

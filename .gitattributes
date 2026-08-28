@@ -1,2 +1,8 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# These are consumed by Linux tooling that rejects CRLF, and the project is
+# routinely edited from Windows (see README, "Developing on Windows with WSL").
+*.sh text eol=lf
+*.service text eol=lf
+*.timer text eol=lf

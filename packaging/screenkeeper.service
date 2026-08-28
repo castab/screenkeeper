@@ -1,0 +1,22 @@
+[Unit]
+Description=Screenkeeper LG webOS television controller
+Documentation=https://github.com/castab/screenkeeper
+# Deliberately no network-online.target dependency: this is a user unit, and
+# the controller already treats an unreachable TV as normal and retries with
+# capped backoff. Starting before the LAN is up costs nothing.
+
+[Service]
+Type=simple
+ExecStart=@INSTALL_ROOT@/current/venv/bin/signage-controller \
+    --config @CONFIG_DIR@/config.yaml \
+    --state-dir @STATE_DIR@ \
+    run
+Restart=always
+RestartSec=5
+# Interrupt, matching the documented Ctrl-C shutdown path and the runtime lock.
+KillSignal=SIGINT
+TimeoutStopSec=30
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=default.target

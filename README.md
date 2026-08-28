@@ -37,10 +37,63 @@ the TV's webOS service.
 
 ## Install
 
+There are two ways to install, for two different jobs.
+
+### Appliance Install
+
+On the signage host, use the installer. It creates a versioned, self-updating
+deployment and two systemd user units:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/castab/screenkeeper/main/scripts/install.sh \
+  -o install.sh
+sudo bash install.sh
+```
+
+**Before the first release tag exists**, there is nothing for the installer to
+resolve, so install from a branch instead:
+
+```bash
+sudo bash install.sh --ref main
+```
+
+Review the script before running it as root. Useful options:
+
+| Option | Purpose |
+| --- | --- |
+| `--ref main` | Install from a branch instead of a release. |
+| `--version 0.2.0` | Install a specific published release. |
+| `--user NAME` | Service account to own and run the install (default `signage`). |
+| `--no-mpv` | Skip mpv; TV control only. |
+| `--no-units` | Skip the systemd user units. |
+| `--force` | Rebuild the version directory even if it already exists. |
+
+The installer is idempotent, so re-running it is safe. Once a release tag
+exists, prefer `signage-controller upgrade` for updates — see "Updating".
+
+What it creates:
+
+```text
+/opt/screenkeeper/versions/<version>/venv/   immutable per-version install
+/opt/screenkeeper/current -> versions/<ver>  atomically swapped symlink
+/usr/local/bin/signage-controller            -> current/venv/bin/signage-controller
+/etc/screenkeeper/config.yaml                survives upgrades
+/var/lib/signage-controller/                 pairing state, survives upgrades
+```
+
+Both runtime processes are systemd **user** units owned by a dedicated,
+lingering account. mpv needs that user's graphical session, and running the TV
+controller as the same user is what lets `signage-controller upgrade` work
+without root.
+
+### Development Install
+
+For working on the project from a checkout, use a plain virtual environment.
+
 On Debian or Ubuntu, install virtual-environment support if needed:
 
 ```bash
-sudo apt install python3.12-venv
+sudo apt install python3-venv
 ```
 
 Create the environment and install the project:
@@ -57,6 +110,10 @@ Run the fake-TV test suite:
 ```bash
 pytest
 ```
+
+A development checkout is updated with `git`, not with
+`signage-controller upgrade`; the upgrade command refuses to run against
+anything but a managed install tree.
 
 ## One-TV Walkthrough
 
@@ -576,8 +633,10 @@ When `XDG_STATE_HOME` is unset, the default is:
 ```
 
 The state directory is created with mode `0700` and the JSON file with mode
-`0600` where supported. Use `--state-dir /var/lib/signage-controller` for a
-later system-service deployment. Do not commit this state file.
+`0600` where supported. An appliance install puts it at
+`/var/lib/signage-controller` instead, which both systemd units pass through
+`--state-dir`; it is outside the versioned install tree, so upgrades and
+rollbacks never touch pairing keys. Do not commit this state file.
 
 ## Deployment Shape
 
@@ -589,9 +648,138 @@ direct access to that host's graphical session, and the controller only makes
 outbound LAN connections to each TV (it never listens for inbound traffic),
 so there is nothing a split or containerized deployment would buy here.
 
-Both processes are ordinary foreground commands; a later deployment phase can
-supervise them with two systemd units alongside the physical-display work
-listed under "Real-Hardware Validation" below.
+Both are ordinary foreground commands, and both are supervised by systemd user
+units on an installed host:
+
+| Unit | Runs | Started by |
+| --- | --- | --- |
+| `screenkeeper.service` | `run` (TV control) | `default.target`, at boot with linger |
+| `screenkeeper-playback.service` | `playback run` (mpv) | `graphical-session.target` |
+| `screenkeeper-upgrade.timer` | `upgrade` | Installed but **not enabled** |
+
+The playback unit is deliberately bound to `graphical-session.target` rather
+than started at boot, because mpv needs a real graphical session. Setting that
+session up automatically — autologin and kiosk desktop configuration — is part
+of the deferred physical-display work under "Real-Hardware Validation" below.
+Until then, playback starts when the signage user's graphical session does.
+
+The two units are independent by design, matching the invariant that a TV
+being off must never stop playback and vice versa. Neither unit `Requires` the
+other, and `screenkeeper.service` deliberately declares no
+`network-online.target` dependency: the controller already treats an
+unreachable TV as normal and retries with capped backoff.
+
+## Updating
+
+On an installed host, updates need no root — the service account owns the
+install tree:
+
+```bash
+signage-controller upgrade --check    # is a newer release published?
+signage-controller upgrade            # install it, activate it, restart the units
+signage-controller versions           # what is installed, and what is active
+signage-controller rollback           # go back to the previous version
+```
+
+`upgrade --check` exits `0` when the host is current and `10` when a newer
+release is available, so it is usable from a monitoring script.
+
+### How An Upgrade Works
+
+1. Resolve the latest release from the GitHub Releases API.
+2. Download the published sdist and verify it against the release's
+   `SHA256SUMS` asset. Pass `--require-checksum` to make a missing checksum
+   fatal rather than a warning.
+3. Build a **new** virtual environment under
+   `/opt/screenkeeper/versions/<new-version>/`. The running version is never
+   touched, because it lives in its own directory.
+4. Smoke-test the new build by running its `signage-controller --version` and
+   confirming it reports the version the release claims.
+5. Only then repoint `current` with a single atomic symlink rename.
+6. Restart the units and prune old versions, keeping the newest `--keep`
+   (default 3).
+
+If any step before 5 fails, the partial build is removed and the host keeps
+running exactly what it was running. That is why `rollback` is instant: the
+previous version is still installed, so rolling back is one more symlink swap.
+
+The virtual environment is built at its final path rather than staged and
+moved, because pip bakes absolute paths into console-script shebangs and
+`pyvenv.cfg`. A venv built somewhere else and relocated is broken at exactly
+the moment it is activated.
+
+### Unattended Upgrades
+
+The timer is installed but **not enabled**, deliberately. An upgrade restarts
+playback, and an unattended restart during business hours is a worse failure
+than running one version behind. Enable it only once the window in
+`screenkeeper-upgrade.timer` is genuinely outside business hours for these
+displays:
+
+```bash
+systemctl --user enable --now screenkeeper-upgrade.timer
+```
+
+### Publishing A Release
+
+`upgrade` reads GitHub Releases, so an update only becomes available when a
+release exists. Pushing a `v*` tag runs `.github/workflows/release.yml`, which
+runs the tests, verifies the tag matches `__version__`, builds the sdist and
+wheel, and publishes them with a `SHA256SUMS` asset.
+
+The version has one source of truth: `__version__` in
+`src/signage_controller/__init__.py`. `pyproject.toml` reads it, `--version`
+reports it, and the release workflow refuses to publish a tag that disagrees
+with it. To cut a release, bump that constant, commit, then:
+
+```bash
+git tag v0.2.0
+git push origin v0.2.0
+```
+
+## Developing on Windows with WSL
+
+The project is Linux-only at runtime — `runtime_lock.py` uses `fcntl`, mpv IPC
+uses Unix-domain sockets, and the installer and units are Linux-native — so
+the test suite cannot run on Windows directly. WSL is the practical way to
+develop this from a Windows machine, and the repository can stay on the
+Windows filesystem:
+
+```powershell
+wsl -d Ubuntu
+```
+
+```bash
+sudo apt install python3-venv       # needed; see the note below
+python3 -m venv ~/screenkeeper-venv
+~/screenkeeper-venv/bin/python -m pip install --upgrade pip
+cd /mnt/c/path/to/screenkeeper      # or /mnt/h/..., wherever the checkout is
+~/screenkeeper-venv/bin/python -m pip install -e '.[test]'
+~/screenkeeper-venv/bin/pytest
+```
+
+Three things are worth knowing:
+
+- **Put the virtual environment on the Linux filesystem**, not under `/mnt/`.
+  A venv on a Windows drive is markedly slower and cannot represent the Unix
+  permissions the state store and IPC sockets rely on. Keeping the checkout on
+  `/mnt/` and the venv in `$HOME` works well.
+- **`python3-venv` is a separate package** on Debian and Ubuntu. Without it,
+  `python3 -m venv` fails with an opaque `Failing command: .../bin/python3`.
+  The installer and `signage-controller upgrade` both check for it up front
+  and say so plainly.
+- **Line endings matter.** `scripts/install.sh` and the unit files are pinned
+  to LF in `.gitattributes`, because bash and systemd both reject CRLF. Do not
+  remove those rules when editing from Windows.
+
+`pytest` writes its temporary directories to the Linux filesystem, which is
+what the symlink and permission tests need — running them against a `/mnt/`
+path would fail for reasons that have nothing to do with the code.
+
+For anything beyond the test suite, WSL is a development environment, not a
+deployment target. It has no LG TV on its LAN by default, no graphical session
+for mpv, and in many configurations no systemd user manager, so `pair`,
+`playback run`, and the systemd units still belong on the real signage host.
 
 ## Automated Coverage
 
@@ -620,6 +808,14 @@ The suite uses no real TV. It covers:
   one failed player not affecting others, missing-media wait/retry,
   media-appears-later recovery, and clean shutdown with no orphaned `mpv`
   processes
+- Update handling: version ordering and pre-release precedence, release
+  resolution from the GitHub API (including the "no release published yet"
+  and unknown-tag cases), checksum verification and mismatch rejection,
+  building a version without activating it, leaving the running install
+  untouched when a build fails, refusing a build that reports the wrong
+  version, building the venv at its final path, atomic activation and
+  rollback, ignoring interrupted builds, pruning that never removes the
+  active version, and update locking
 
 None of the automated coverage above requires `mpv`, an X server, Wayland, a
 GPU, a physical display, or a real LG TV.

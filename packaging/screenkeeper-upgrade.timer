@@ -1,0 +1,14 @@
+[Unit]
+Description=Screenkeeper unattended upgrade check
+Documentation=https://github.com/castab/screenkeeper
+
+[Timer]
+# Installed but NOT enabled. An upgrade restarts playback, so opt in only once
+# the window below is genuinely outside business hours for these displays:
+#   systemctl --user enable --now screenkeeper-upgrade.timer
+OnCalendar=*-*-* 04:00:00
+RandomizedDelaySec=30m
+Persistent=true
+
+[Install]
+WantedBy=timers.target

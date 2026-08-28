@@ -1,0 +1,11 @@
+[Unit]
+Description=Screenkeeper unattended upgrade
+Documentation=https://github.com/castab/screenkeeper
+
+[Service]
+Type=oneshot
+# Runs as the owner of the install tree, so no privilege escalation is needed.
+# On success this restarts screenkeeper.service and screenkeeper-playback.service,
+# which briefly interrupts playback, hence the off-hours timer.
+ExecStart=@INSTALL_ROOT@/current/venv/bin/signage-controller upgrade
+NoNewPrivileges=yes

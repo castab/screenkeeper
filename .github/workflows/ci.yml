@@ -58,3 +58,12 @@ jobs:
           signage-controller --help
           signage-controller pair --help
           signage-controller playback --help
+          signage-controller upgrade --help
+          signage-controller --version
+
+      - name: Installer and unit-file checks
+        run: |
+          bash -n scripts/install.sh
+          shellcheck scripts/install.sh
+          # bash and systemd both reject CRLF; .gitattributes pins these to LF.
+          ! grep -rlU $'\r' scripts/install.sh packaging/
