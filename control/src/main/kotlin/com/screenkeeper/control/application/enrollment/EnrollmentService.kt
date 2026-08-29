@@ -13,6 +13,7 @@ import com.screenkeeper.control.persistence.repository.OrganizationRepository
 import com.screenkeeper.control.persistence.repository.PlayerCredentialRepository
 import com.screenkeeper.control.persistence.repository.PlayerRepository
 import com.screenkeeper.control.security.sha256
+import io.micrometer.core.instrument.MeterRegistry
 import io.opentelemetry.api.GlobalOpenTelemetry
 import io.opentelemetry.api.trace.StatusCode
 import io.opentelemetry.api.trace.Tracer
@@ -61,6 +62,7 @@ class EnrollmentService(
     private val playerCredentialRepository: PlayerCredentialRepository,
     private val locationRepository: LocationRepository,
     private val organizationRepository: OrganizationRepository,
+    private val meterRegistry: MeterRegistry,
     private val tracer: Tracer = GlobalOpenTelemetry.getTracer("screenkeeper-control"),
 ) {
     /**
@@ -80,7 +82,7 @@ class EnrollmentService(
     ): EnrollmentTicket {
         val span = tracer.spanBuilder("screenkeeper.enrollment.create_or_reuse").startSpan()
         try {
-            return jdbi.inTransaction<EnrollmentTicket, RuntimeException> { handle ->
+            val ticket = jdbi.inTransaction<EnrollmentTicket, RuntimeException> { handle ->
                 if (playerRepository.existsByInstallationId(handle, installationId)) {
                     throw DomainError.AlreadyEnrolled()
                 }
@@ -94,10 +96,13 @@ class EnrollmentService(
                 )
                 EnrollmentTicket(row.id, code, row.expiresAt, AppConfig.ENROLLMENT_POLL_INTERVAL_SECONDS)
             }
+            meterRegistry.counter("screenkeeper.enrollment.create_or_reuse", "result", "success").increment()
+            return ticket
         } catch (e: DomainError) {
             span.setAttribute("error.code", e.code)
             span.recordException(e)
             span.setStatus(StatusCode.ERROR)
+            meterRegistry.counter("screenkeeper.enrollment.create_or_reuse", "result", e.code).increment()
             throw e
         } finally {
             span.end()
@@ -132,7 +137,7 @@ class EnrollmentService(
     fun claim(code: String, locationId: UUID, name: String): ClaimResult {
         val span = tracer.spanBuilder("screenkeeper.enrollment.claim").startSpan()
         try {
-            return jdbi.inTransaction<ClaimResult, RuntimeException> { handle ->
+            val result = jdbi.inTransaction<ClaimResult, RuntimeException> { handle ->
                 val enrollment = enrollmentRepository.findByCodeHash(handle, sha256(code)) ?: throw DomainError.EnrollmentNotFound()
                 if (enrollment.isClaimed) throw DomainError.EnrollmentAlreadyClaimed()
                 if (enrollment.isExpiredAt(clock.instant())) throw DomainError.EnrollmentExpired()
@@ -153,10 +158,13 @@ class EnrollmentService(
 
                 ClaimResult(player, location, organization)
             }
+            meterRegistry.counter("screenkeeper.enrollment.claim", "result", "success").increment()
+            return result
         } catch (e: DomainError) {
             span.setAttribute("error.code", e.code)
             span.recordException(e)
             span.setStatus(StatusCode.ERROR)
+            meterRegistry.counter("screenkeeper.enrollment.claim", "result", e.code).increment()
             throw e
         } finally {
             span.end()

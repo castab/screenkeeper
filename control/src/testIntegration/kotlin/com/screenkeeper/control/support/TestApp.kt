@@ -62,7 +62,7 @@ class TestApp(
 
     val enrollmentService = EnrollmentService(
         jdbi, config, clock, enrollmentRepository, playerRepository, playerCredentialRepository,
-        locationRepository, organizationRepository, tracer,
+        locationRepository, organizationRepository, meterRegistry, tracer,
     )
     val heartbeatService = HeartbeatService(jdbi, clock, playerRepository, playerReportRepository)
     val organizationService = OrganizationService(jdbi, organizationRepository)

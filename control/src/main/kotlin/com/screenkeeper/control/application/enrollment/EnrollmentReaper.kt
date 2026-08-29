@@ -1,6 +1,7 @@
 package com.screenkeeper.control.application.enrollment
 
 import com.screenkeeper.control.persistence.repository.EnrollmentRepository
+import io.micrometer.core.instrument.MeterRegistry
 import io.opentelemetry.api.GlobalOpenTelemetry
 import io.opentelemetry.api.trace.StatusCode
 import io.opentelemetry.api.trace.Tracer
@@ -22,6 +23,7 @@ class EnrollmentReaper(
     private val enrollmentRepository: EnrollmentRepository,
     private val clock: Clock,
     private val reapAfter: Duration,
+    private val meterRegistry: MeterRegistry,
     private val interval: Duration = Duration.ofMinutes(5),
     private val tracer: Tracer = GlobalOpenTelemetry.getTracer("screenkeeper-control"),
 ) {
@@ -49,12 +51,15 @@ class EnrollmentReaper(
                 enrollmentRepository.deleteExpiredPendingBefore(handle, cutoff)
             }
             span.setAttribute("enrollment.reaped_count", removed.toLong())
+            meterRegistry.counter("screenkeeper.enrollment.reap.runs", "result", "success").increment()
+            meterRegistry.counter("screenkeeper.enrollment.reap.removed").increment(removed.toDouble())
             if (removed > 0) {
                 logger.info("Reaped {} expired pending enrollment(s)", removed)
             }
         } catch (e: Exception) {
             span.recordException(e)
             span.setStatus(StatusCode.ERROR)
+            meterRegistry.counter("screenkeeper.enrollment.reap.runs", "result", "failure").increment()
             logger.error("Enrollment reaper iteration failed", e)
         } finally {
             span.end()
