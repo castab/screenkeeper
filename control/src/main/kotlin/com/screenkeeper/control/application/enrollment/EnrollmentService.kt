@@ -13,6 +13,9 @@ import com.screenkeeper.control.persistence.repository.OrganizationRepository
 import com.screenkeeper.control.persistence.repository.PlayerCredentialRepository
 import com.screenkeeper.control.persistence.repository.PlayerRepository
 import com.screenkeeper.control.security.sha256
+import io.opentelemetry.api.GlobalOpenTelemetry
+import io.opentelemetry.api.trace.StatusCode
+import io.opentelemetry.api.trace.Tracer
 import org.jdbi.v3.core.Handle
 import org.jdbi.v3.core.Jdbi
 import org.jdbi.v3.core.statement.UnableToExecuteStatementException
@@ -58,6 +61,7 @@ class EnrollmentService(
     private val playerCredentialRepository: PlayerCredentialRepository,
     private val locationRepository: LocationRepository,
     private val organizationRepository: OrganizationRepository,
+    private val tracer: Tracer = GlobalOpenTelemetry.getTracer("screenkeeper-control"),
 ) {
     /**
      * Creates a pending enrollment, or supersedes the existing pending one for
@@ -73,21 +77,32 @@ class EnrollmentService(
         deviceToken: String,
         screenkeeperVersion: String,
         hostname: String,
-    ): EnrollmentTicket =
-        jdbi.inTransaction<EnrollmentTicket, RuntimeException> { handle ->
-            if (playerRepository.existsByInstallationId(handle, installationId)) {
-                throw DomainError.AlreadyEnrolled()
-            }
-            val deviceTokenHash = sha256(deviceToken)
-            val code = PairingCode.generate()
-            val codeHash = sha256(code)
-            val expiresAt = clock.instant().plus(Duration.ofMinutes(config.enrollmentTtlMinutes))
+    ): EnrollmentTicket {
+        val span = tracer.spanBuilder("screenkeeper.enrollment.create_or_reuse").startSpan()
+        try {
+            return jdbi.inTransaction<EnrollmentTicket, RuntimeException> { handle ->
+                if (playerRepository.existsByInstallationId(handle, installationId)) {
+                    throw DomainError.AlreadyEnrolled()
+                }
+                val deviceTokenHash = sha256(deviceToken)
+                val code = PairingCode.generate()
+                val codeHash = sha256(code)
+                val expiresAt = clock.instant().plus(Duration.ofMinutes(config.enrollmentTtlMinutes))
 
-            val row = enrollmentRepository.upsertPending(
-                handle, installationId, deviceTokenHash, codeHash, expiresAt, screenkeeperVersion, hostname,
-            )
-            EnrollmentTicket(row.id, code, row.expiresAt, AppConfig.ENROLLMENT_POLL_INTERVAL_SECONDS)
+                val row = enrollmentRepository.upsertPending(
+                    handle, installationId, deviceTokenHash, codeHash, expiresAt, screenkeeperVersion, hostname,
+                )
+                EnrollmentTicket(row.id, code, row.expiresAt, AppConfig.ENROLLMENT_POLL_INTERVAL_SECONDS)
+            }
+        } catch (e: DomainError) {
+            span.setAttribute("error.code", e.code)
+            span.recordException(e)
+            span.setStatus(StatusCode.ERROR)
+            throw e
+        } finally {
+            span.end()
         }
+    }
 
     /** Resolves the enrollment for the bearer-auth filter; independent of any write flow. */
     fun findById(handle: Handle, enrollmentId: UUID): Enrollment? = enrollmentRepository.findById(handle, enrollmentId)
@@ -114,28 +129,39 @@ class EnrollmentService(
      * players.installation_id unique constraint is the backstop against two
      * concurrent claims of the same code racing past the claimed_at check.
      */
-    fun claim(code: String, locationId: UUID, name: String): ClaimResult =
-        jdbi.inTransaction<ClaimResult, RuntimeException> { handle ->
-            val enrollment = enrollmentRepository.findByCodeHash(handle, sha256(code)) ?: throw DomainError.EnrollmentNotFound()
-            if (enrollment.isClaimed) throw DomainError.EnrollmentAlreadyClaimed()
-            if (enrollment.isExpiredAt(clock.instant())) throw DomainError.EnrollmentExpired()
-            val location = locationRepository.findById(handle, locationId) ?: throw DomainError.LocationNotFound()
-            val organization = organizationRepository.findById(handle, location.organizationId)
-                ?: throw DomainError.OrganizationNotFound()
+    fun claim(code: String, locationId: UUID, name: String): ClaimResult {
+        val span = tracer.spanBuilder("screenkeeper.enrollment.claim").startSpan()
+        try {
+            return jdbi.inTransaction<ClaimResult, RuntimeException> { handle ->
+                val enrollment = enrollmentRepository.findByCodeHash(handle, sha256(code)) ?: throw DomainError.EnrollmentNotFound()
+                if (enrollment.isClaimed) throw DomainError.EnrollmentAlreadyClaimed()
+                if (enrollment.isExpiredAt(clock.instant())) throw DomainError.EnrollmentExpired()
+                val location = locationRepository.findById(handle, locationId) ?: throw DomainError.LocationNotFound()
+                val organization = organizationRepository.findById(handle, location.organizationId)
+                    ?: throw DomainError.OrganizationNotFound()
 
-            val player = try {
-                playerRepository.insert(
-                    handle, enrollment.installationId, locationId, name,
-                    enrollment.screenkeeperVersion, enrollment.hostname,
-                )
-            } catch (e: UnableToExecuteStatementException) {
-                if (e.isUniqueViolation()) throw DomainError.EnrollmentAlreadyClaimed() else throw e
+                val player = try {
+                    playerRepository.insert(
+                        handle, enrollment.installationId, locationId, name,
+                        enrollment.screenkeeperVersion, enrollment.hostname,
+                    )
+                } catch (e: UnableToExecuteStatementException) {
+                    if (e.isUniqueViolation()) throw DomainError.EnrollmentAlreadyClaimed() else throw e
+                }
+                playerCredentialRepository.insert(handle, player.id, enrollment.deviceTokenHash)
+                enrollmentRepository.markClaimed(handle, enrollment.id, player.id, clock.instant())
+
+                ClaimResult(player, location, organization)
             }
-            playerCredentialRepository.insert(handle, player.id, enrollment.deviceTokenHash)
-            enrollmentRepository.markClaimed(handle, enrollment.id, player.id, clock.instant())
-
-            ClaimResult(player, location, organization)
+        } catch (e: DomainError) {
+            span.setAttribute("error.code", e.code)
+            span.recordException(e)
+            span.setStatus(StatusCode.ERROR)
+            throw e
+        } finally {
+            span.end()
         }
+    }
 
     private fun UnableToExecuteStatementException.isUniqueViolation(): Boolean {
         var cause: Throwable? = this

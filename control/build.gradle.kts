@@ -76,9 +76,12 @@ dependencies {
     implementation(libs.micrometer.core)
     implementation(libs.micrometer.registry.prometheus)
 
+    implementation(libs.opentelemetry.api)
+
     testImplementation(platform(libs.kotest.bom))
     testImplementation(libs.kotest.runner.junit5)
     testImplementation(libs.kotest.assertions.core)
+    testImplementation(libs.opentelemetry.sdk.testing)
 }
 
 tasks.test {

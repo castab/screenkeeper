@@ -5,6 +5,13 @@
 // on different hosts -- the control server is central infrastructure, not
 // an edge player -- so this is a separate file, not a shared parameterized
 // one. See deploy/alloy/README.md for the full picture.
+//
+// Journald tailing below is meaningful today only in the sense that it picks
+// up Alloy's own logs and anything else on this host: control/ has no
+// systemd unit of its own (it deploys via Docker), so there is no
+// "screenkeeper control" journal entry to filter for yet. The block is
+// included for parity with edge.alloy and for whenever/if a host-native
+// control deployment exists; it is not a gap in this pass.
 
 // ---------------------------------------------------------------------------
 // Screenkeeper Control metrics
@@ -59,22 +66,23 @@ prometheus.relabel "identity" {
 
 // ---------------------------------------------------------------------------
 // Central export. Same boundary as edge.alloy: this URL/credential is
-// deployment configuration Screenkeeper Control never sees.
+// deployment configuration Screenkeeper Control never sees. A bearer token,
+// not basic auth -- same fleet-provisioning rationale as edge.alloy.
 // ---------------------------------------------------------------------------
 
 prometheus.remote_write "central" {
 	endpoint {
 		url = sys.env("METRICS_REMOTE_WRITE_URL")
 
-		basic_auth {
-			username = sys.env("METRICS_REMOTE_WRITE_USERNAME")
-			password = sys.env("METRICS_REMOTE_WRITE_PASSWORD")
-		}
+		bearer_token = sys.env("METRICS_REMOTE_WRITE_TOKEN")
 	}
 }
 
 // ---------------------------------------------------------------------------
-// Local OTLP receiver, inert for now -- same rationale as edge.alloy.
+// Local OTLP receiver -- same contract as edge.alloy. The control server's
+// OTel Java agent (opt-in, see control/README.md's "Tracing" section) pushes
+// spans here when an operator enables it; metrics-over-OTLP has no producer
+// yet, so that path stays inert.
 // ---------------------------------------------------------------------------
 
 otelcol.receiver.otlp "default" {
@@ -87,9 +95,76 @@ otelcol.receiver.otlp "default" {
 
 	output {
 		metrics = [otelcol.exporter.prometheus.default.input]
+		traces  = [otelcol.processor.attributes.identity.input]
 	}
 }
 
 otelcol.exporter.prometheus "default" {
 	forward_to = [prometheus.relabel.identity.receiver]
+}
+
+// ---------------------------------------------------------------------------
+// Trace identity enrichment -- only "environment", matching the Prometheus
+// relabel rule above (no player/location/org identity on a control host).
+// Span attributes, not true OTel Resource attributes -- see edge.alloy.
+// ---------------------------------------------------------------------------
+
+otelcol.processor.attributes "identity" {
+	action {
+		key    = "environment"
+		value  = sys.env("SCREENKEEPER_ENVIRONMENT")
+		action = "upsert"
+	}
+
+	output {
+		traces = [otelcol.exporter.otlp.central.input]
+	}
+}
+
+otelcol.auth.bearer "central_traces" {
+	token = sys.env("TRACES_OTLP_TOKEN")
+}
+
+otelcol.exporter.otlp "central" {
+	client {
+		endpoint = sys.env("TRACES_OTLP_ENDPOINT")
+		auth     = otelcol.auth.bearer.central_traces.handler
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Logs: tails this host's systemd journal. See the file-level comment above
+// for why this currently only covers Alloy's own unit and anything else on
+// the host, not control/ itself (Docker-deployed, no systemd unit).
+// ---------------------------------------------------------------------------
+
+loki.relabel "journal_unit" {
+	forward_to = []
+
+	rule {
+		source_labels = ["__journal__systemd_unit"]
+		target_label  = "unit"
+	}
+	rule {
+		source_labels = ["__journal__systemd_user_unit"]
+		target_label  = "unit"
+	}
+	rule {
+		source_labels = ["unit"]
+		regex         = "screenkeeper.*\\.service"
+		action        = "keep"
+	}
+}
+
+loki.source.journal "screenkeeper" {
+	forward_to    = [loki.write.central.receiver]
+	relabel_rules = loki.relabel.journal_unit.rules
+	labels        = {component = "loki.source.journal"}
+}
+
+loki.write "central" {
+	endpoint {
+		url          = sys.env("LOGS_REMOTE_WRITE_URL")
+		bearer_token = sys.env("LOGS_REMOTE_WRITE_TOKEN")
+	}
 }

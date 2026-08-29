@@ -15,6 +15,15 @@ power_on_delay: 15
 #   host: 127.0.0.1
 #   port: 9464
 
+# Optional OpenTelemetry tracing spans (TV commands, playback start, control-
+# plane heartbeats), exported over OTLP to the same host-level agent's local
+# receiver -- never to a remote/central URL. Like metrics, this controller
+# holds no central credential; the push never leaves 127.0.0.1.
+# See docs/architecture/observability.md.
+# tracing:
+#   enabled: true
+#   endpoint: http://127.0.0.1:4318
+
 tvs:
   - id: dev-tv
     name: Development LG TV

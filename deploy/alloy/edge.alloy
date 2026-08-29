@@ -6,7 +6,10 @@
 //   2. scrapes curated host metrics
 //   3. attaches player/location identity, if this host is enrolled
 //   4. remote_writes everything to a central Prometheus-compatible backend
-//   5. exposes a local OTLP receiver, ready for future use (inert for now)
+//   5. receives local OTLP traces (TV commands, playback start, control-plane
+//      heartbeats) and forwards them to a central OTLP backend
+//   6. tails this host's systemd journal for screenkeeper* units and ships it
+//      to a central Loki-compatible backend
 //
 // Every value that names the central backend or carries a credential comes
 // from Alloy's own environment (sys.env()) -- Screenkeeper never sees it, and
@@ -88,19 +91,18 @@ prometheus.relabel "identity" {
 }
 
 // ---------------------------------------------------------------------------
-// Central export. The URL and credentials are deployment configuration that
+// Central export. The URL and credential are deployment configuration that
 // belongs to Alloy, never to Screenkeeper -- see the boundary table in
-// docs/architecture/observability.md.
+// docs/architecture/observability.md. A bearer token, not basic auth: these
+// are headless, unattended appliances, and a single rotatable token per
+// fleet is simpler to provision than a username/password pair per host.
 // ---------------------------------------------------------------------------
 
 prometheus.remote_write "central" {
 	endpoint {
 		url = sys.env("METRICS_REMOTE_WRITE_URL")
 
-		basic_auth {
-			username = sys.env("METRICS_REMOTE_WRITE_USERNAME")
-			password = sys.env("METRICS_REMOTE_WRITE_PASSWORD")
-		}
+		bearer_token = sys.env("METRICS_REMOTE_WRITE_TOKEN")
 
 		// Alloy's own WAL/retry/buffering absorbs a WAN outage; nothing in
 		// Screenkeeper needs to retry or buffer telemetry itself.
@@ -108,13 +110,11 @@ prometheus.remote_write "central" {
 }
 
 // ---------------------------------------------------------------------------
-// Local OTLP receiver. Nothing on this host emits OTLP today (deferred --
-// see docs/architecture/observability.md), so this proves the local OTLP
-// contract (http://127.0.0.1:4318, 127.0.0.1:4317) is ready for a future
-// application to use without any Alloy reconfiguration. Any OTLP metrics
-// received flow into the same central Prometheus destination as everything
-// above; traces/logs have no destination yet -- wiring one is future work,
-// not required for this receiver to exist and accept connections today.
+// Local OTLP receiver -- http://127.0.0.1:4318 (and gRPC :4317), the contract
+// documented in docs/architecture/observability.md's "OTLP readiness"
+// section. signage-controller's optional `tracing:` config pushes spans here
+// when enabled; metrics-over-OTLP has no application producer yet, so that
+// path stays inert.
 // ---------------------------------------------------------------------------
 
 otelcol.receiver.otlp "default" {
@@ -127,9 +127,94 @@ otelcol.receiver.otlp "default" {
 
 	output {
 		metrics = [otelcol.exporter.prometheus.default.input]
+		traces  = [otelcol.processor.attributes.identity.input]
 	}
 }
 
 otelcol.exporter.prometheus "default" {
 	forward_to = [prometheus.relabel.identity.receiver]
+}
+
+// ---------------------------------------------------------------------------
+// Trace identity enrichment. Alloy has no otelcol.processor.resource
+// component for injecting custom key/value pairs (only resourcedetection,
+// which is for auto-detected host/cloud facts) -- these land as SPAN
+// attributes, not true OTel Resource attributes. Still app-free identity
+// attachment, the same principle as the Prometheus relabel rules above.
+// ---------------------------------------------------------------------------
+
+otelcol.processor.attributes "identity" {
+	action {
+		key    = "screenkeeper.player_id"
+		value  = sys.env("SCREENKEEPER_PLAYER_ID")
+		action = "upsert"
+	}
+	action {
+		key    = "screenkeeper.location_id"
+		value  = sys.env("SCREENKEEPER_LOCATION_ID")
+		action = "upsert"
+	}
+	action {
+		key    = "screenkeeper.organization_id"
+		value  = sys.env("SCREENKEEPER_ORGANIZATION_ID")
+		action = "upsert"
+	}
+
+	output {
+		traces = [otelcol.exporter.otlp.central.input]
+	}
+}
+
+otelcol.auth.bearer "central_traces" {
+	token = sys.env("TRACES_OTLP_TOKEN")
+}
+
+otelcol.exporter.otlp "central" {
+	client {
+		endpoint = sys.env("TRACES_OTLP_ENDPOINT")
+		auth     = otelcol.auth.bearer.central_traces.handler
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Logs: tail this host's systemd journal for screenkeeper* units and ship to
+// a central Loki-compatible backend. screenkeeper.service,
+// screenkeeper-playback.service, and screenkeeper-agent.service are systemd
+// *user* units, so their journal entries carry __journal__systemd_user_unit,
+// not __journal__systemd_unit -- both are extracted into the same "unit"
+// label, then everything else is dropped by the keep rule. Python's stdlib
+// logging is untouched; this only adds a transport, same as metrics/traces.
+// ---------------------------------------------------------------------------
+
+loki.relabel "journal_unit" {
+	// Only .rules is consumed (by loki.source.journal below); this instance
+	// is never itself a hop in the log data path, so forward_to is empty.
+	forward_to = []
+
+	rule {
+		source_labels = ["__journal__systemd_unit"]
+		target_label  = "unit"
+	}
+	rule {
+		source_labels = ["__journal__systemd_user_unit"]
+		target_label  = "unit"
+	}
+	rule {
+		source_labels = ["unit"]
+		regex         = "screenkeeper.*\\.service"
+		action        = "keep"
+	}
+}
+
+loki.source.journal "screenkeeper" {
+	forward_to    = [loki.write.central.receiver]
+	relabel_rules = loki.relabel.journal_unit.rules
+	labels        = {component = "loki.source.journal"}
+}
+
+loki.write "central" {
+	endpoint {
+		url          = sys.env("LOGS_REMOTE_WRITE_URL")
+		bearer_token = sys.env("LOGS_REMOTE_WRITE_TOKEN")
+	}
 }

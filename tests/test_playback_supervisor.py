@@ -6,6 +6,10 @@ import logging
 from pathlib import Path
 
 import pytest
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+from opentelemetry.trace import StatusCode
 
 from signage_controller.config import PlaybackConfig, PlayerConfig
 from signage_controller.playback.supervisor import (
@@ -15,6 +19,13 @@ from signage_controller.playback.supervisor import (
 )
 
 from .conftest import FakeProcessLauncher
+
+
+def _tracer_with_exporter() -> tuple:
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    return provider.get_tracer("test"), exporter
 
 
 FAST_KWARGS = dict(media_poll_interval=0.02, restart_backoff_multipliers=(1.0,))
@@ -51,6 +62,58 @@ async def test_successful_spawn_logs_expected_sequence(tmp_path, caplog) -> None
     assert "starting mpv for" in caplog.text
     assert "mpv started pid=" in caplog.text
     assert "playback healthy" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_successful_start_emits_a_span_without_error_status(tmp_path) -> None:
+    launcher = FakeProcessLauncher()
+    tracer, exporter = _tracer_with_exporter()
+    stop_event = asyncio.Event()
+    (tmp_path / "menu.mp4").write_bytes(b"fake")
+    supervisor = PlayerSupervisor(
+        _player(media=tmp_path / "menu.mp4"),
+        _playback(),
+        tmp_path / "dev-menu.sock",
+        launcher=launcher,
+        tracer=tracer,
+        **FAST_KWARGS,
+    )
+
+    task = asyncio.create_task(supervisor.run(stop_event))
+    await asyncio.sleep(0.05)
+    stop_event.set()
+    await task
+
+    spans = [s for s in exporter.get_finished_spans() if s.name == "signage_controller.playback.start"]
+    assert len(spans) == 1
+    # OTel convention: successful spans stay UNSET; only failures get ERROR.
+    assert spans[0].status.status_code == StatusCode.UNSET
+    assert spans[0].attributes["player.id"] == "dev-menu"
+
+
+@pytest.mark.asyncio
+async def test_failed_start_emits_an_error_span_and_keeps_retrying(tmp_path) -> None:
+    launcher = FakeProcessLauncher(outcomes=[OSError("no such file")] * 5)
+    tracer, exporter = _tracer_with_exporter()
+    stop_event = asyncio.Event()
+    (tmp_path / "menu.mp4").write_bytes(b"fake")
+    supervisor = PlayerSupervisor(
+        _player(media=tmp_path / "menu.mp4"),
+        _playback(),
+        tmp_path / "dev-menu.sock",
+        launcher=launcher,
+        tracer=tracer,
+        **FAST_KWARGS,
+    )
+
+    task = asyncio.create_task(supervisor.run(stop_event))
+    await asyncio.sleep(0.05)
+    stop_event.set()
+    await task
+
+    spans = [s for s in exporter.get_finished_spans() if s.name == "signage_controller.playback.start"]
+    assert len(spans) >= 1
+    assert all(span.status.status_code == StatusCode.ERROR for span in spans)
 
 
 @pytest.mark.asyncio

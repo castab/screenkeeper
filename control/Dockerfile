@@ -22,6 +22,16 @@ WORKDIR /opt/screenkeeper-control
 
 COPY --from=build /workspace/build/install/screenkeeper-control/ ./
 
+# The OTel Java agent, baked in but inert: JAVA_TOOL_OPTIONS is unset below,
+# so nothing loads it unless an operator sets that env var at deploy time --
+# the "no application code change" auto-instrumentation path documented in
+# docs/architecture/observability.md. Verify the current release and its
+# published checksum at https://repo1.maven.org/maven2/io/opentelemetry/javaagent/opentelemetry-javaagent/
+# before bumping this pin.
+ADD --chmod=0644 --checksum=sha256:1b0246d3e60b608b07836a9656e1a97bb7d084b088111ef34ecd47483acebcf5 \
+    https://repo1.maven.org/maven2/io/opentelemetry/javaagent/opentelemetry-javaagent/2.16.0/opentelemetry-javaagent-2.16.0.jar \
+    /opt/opentelemetry-javaagent.jar
+
 # No secrets are baked into the image. SCREENKEEPER_ADMIN_TOKEN,
 # SCREENKEEPER_DATABASE_PASSWORD, etc. are supplied at runtime only.
 USER screenkeeper

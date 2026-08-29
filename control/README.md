@@ -138,15 +138,45 @@ persisted as a boolean that could go stale.
 That distinction matters here specifically because, unlike an edge player,
 this server's public port is reachable over WAN -- every enrolled player's
 heartbeat reaches it directly, so metrics must never share that listener.
-This process holds no remote-write URL or credential of any kind; a
-host-level agent (e.g. Grafana Alloy) is expected to scrape this endpoint and
-own all outbound transport. See `docs/architecture/observability.md` at the
-repository root for the full architecture.
+For Prometheus scraping specifically, this process holds no remote-write URL
+or credential of any kind; a host-level agent (e.g. Grafana Alloy) is
+expected to scrape this endpoint and own all outbound transport. See
+`docs/architecture/observability.md` at the repository root for the full
+architecture.
 
 ```bash
 curl http://127.0.0.1:9464/metrics       # local Prometheus exposition
 curl -i http://localhost:8080/metrics    # 404 -- not served on the public port
 ```
+
+### Tracing
+
+The image bundles the OpenTelemetry Java agent at `/opt/opentelemetry-javaagent.jar`
+(see `Dockerfile`), but it is **inert by default** -- no `-javaagent` flag is
+set unless an operator adds one. Enabling it is a deployment change only, no
+application code needs to change:
+
+```bash
+JAVA_TOOL_OPTIONS="-javaagent:/opt/opentelemetry-javaagent.jar"
+OTEL_EXPORTER_OTLP_ENDPOINT="http://127.0.0.1:4318"   # the local Alloy OTLP receiver
+OTEL_SERVICE_NAME="screenkeeper-control"
+OTEL_RESOURCE_ATTRIBUTES="deployment.environment=production"
+```
+
+OTLP export is push-based (unlike the pull-based `/metrics` above), but the
+push target is always a local Alloy instance -- never a WAN/central endpoint
+-- so this does not cross the "no outbound transport in the app" boundary; see
+`docs/architecture/observability.md`'s "OTLP readiness" section. Confirmed
+locally: the agent's Jetty instrumentation produces a proper `SERVER` span for
+http4k's Jetty backend (parenting the JDBC client spans and this codebase's
+own manual spans, e.g. `screenkeeper.enrollment.claim`), so enabling the agent
+gives full request-level tracing with no gaps to fill manually.
+
+`EnrollmentReaper`'s background reap job and `EnrollmentService`'s
+create/claim operations also emit manual spans via `GlobalOpenTelemetry`
+(`opentelemetry-api` only, no SDK dependency in application code) -- these are
+true no-ops whenever the agent isn't attached, so they carry no cost or
+behavior change when tracing is off.
 
 ## Admin API walkthrough
 
