@@ -1,0 +1,95 @@
+// Grafana Alloy configuration for a Screenkeeper Control (central server) host.
+//
+// Structurally identical to edge.alloy, but scrapes the control server's
+// local metrics listener instead of the edge player's. These normally run
+// on different hosts -- the control server is central infrastructure, not
+// an edge player -- so this is a separate file, not a shared parameterized
+// one. See deploy/alloy/README.md for the full picture.
+
+// ---------------------------------------------------------------------------
+// Screenkeeper Control metrics
+// ---------------------------------------------------------------------------
+
+discovery.relabel "screenkeeper_control" {
+	targets = [
+		// SCREENKEEPER_CONTROL_METRICS_HOST/_PORT, default 127.0.0.1:9464.
+		// Never the public SCREENKEEPER_CONTROL_PORT -- see control/README.md.
+		{"__address__" = "127.0.0.1:9464", "job" = "screenkeeper_control"},
+	]
+
+	rule {
+		target_label = "instance"
+		replacement  = sys.env("HOSTNAME")
+	}
+}
+
+prometheus.scrape "screenkeeper_control" {
+	targets         = discovery.relabel.screenkeeper_control.output
+	scrape_interval = "15s"
+	forward_to      = [prometheus.relabel.identity.receiver]
+}
+
+// ---------------------------------------------------------------------------
+// Host metrics -- a curated set, not everything node_exporter can expose.
+// ---------------------------------------------------------------------------
+
+prometheus.exporter.unix "host" {
+	set_collectors = ["cpu", "meminfo", "diskstats", "filesystem", "loadavg", "netdev", "uptime"]
+}
+
+prometheus.scrape "host" {
+	targets         = prometheus.exporter.unix.host.targets
+	scrape_interval = "30s"
+	forward_to      = [prometheus.relabel.identity.receiver]
+}
+
+// ---------------------------------------------------------------------------
+// Fleet/environment identity. A control-server host has no player/location
+// of its own; only SCREENKEEPER_ENVIRONMENT is meaningful here.
+// ---------------------------------------------------------------------------
+
+prometheus.relabel "identity" {
+	forward_to = [prometheus.remote_write.central.receiver]
+
+	rule {
+		target_label = "environment"
+		replacement  = sys.env("SCREENKEEPER_ENVIRONMENT")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Central export. Same boundary as edge.alloy: this URL/credential is
+// deployment configuration Screenkeeper Control never sees.
+// ---------------------------------------------------------------------------
+
+prometheus.remote_write "central" {
+	endpoint {
+		url = sys.env("METRICS_REMOTE_WRITE_URL")
+
+		basic_auth {
+			username = sys.env("METRICS_REMOTE_WRITE_USERNAME")
+			password = sys.env("METRICS_REMOTE_WRITE_PASSWORD")
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Local OTLP receiver, inert for now -- same rationale as edge.alloy.
+// ---------------------------------------------------------------------------
+
+otelcol.receiver.otlp "default" {
+	grpc {
+		endpoint = "127.0.0.1:4317"
+	}
+	http {
+		endpoint = "127.0.0.1:4318"
+	}
+
+	output {
+		metrics = [otelcol.exporter.prometheus.default.input]
+	}
+}
+
+otelcol.exporter.prometheus "default" {
+	forward_to = [prometheus.relabel.identity.receiver]
+}

@@ -38,6 +38,9 @@ class AppConfigSpec : FunSpec({
         config.onlineMultiplier shouldBe 3.0
         config.enrollmentTtlMinutes shouldBe 15L
         config.enrollmentReapAfterMinutes shouldBe 60L
+        config.metricsEnabled shouldBe true
+        config.metricsHost shouldBe "127.0.0.1"
+        config.metricsPort shouldBe 9464
     }
 
     test("honors overrides for optional vars") {
@@ -53,6 +56,19 @@ class AppConfigSpec : FunSpec({
         config.port shouldBe 9090
         config.heartbeatIntervalSeconds shouldBe 45L
         config.onlineMultiplier shouldBe 2.5
+    }
+
+    test("honors overrides for metrics vars") {
+        val config = AppConfig.fromEnv(
+            validEnv + mapOf(
+                "SCREENKEEPER_CONTROL_METRICS_ENABLED" to "false",
+                "SCREENKEEPER_CONTROL_METRICS_HOST" to "0.0.0.0",
+                "SCREENKEEPER_CONTROL_METRICS_PORT" to "9999",
+            ),
+        )
+        config.metricsEnabled shouldBe false
+        config.metricsHost shouldBe "0.0.0.0"
+        config.metricsPort shouldBe 9999
     }
 
     test("toString never includes the database password or admin token") {

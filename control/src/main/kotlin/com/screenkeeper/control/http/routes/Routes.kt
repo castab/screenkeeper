@@ -6,6 +6,7 @@ import com.screenkeeper.control.application.registry.LocationService
 import com.screenkeeper.control.application.registry.OrganizationService
 import com.screenkeeper.control.application.registry.PlayerRegistryService
 import com.screenkeeper.control.http.filters.ErrorHandlingFilter
+import com.screenkeeper.control.http.filters.MetricsFilter
 import com.screenkeeper.control.http.filters.RequestLoggingFilter
 import com.screenkeeper.control.persistence.migration.Migrator
 import com.screenkeeper.control.persistence.repository.EnrollmentRepository
@@ -17,6 +18,7 @@ import com.screenkeeper.control.security.PlayerCredentialFilter
 import org.http4k.core.HttpHandler
 import org.http4k.core.Method
 import org.http4k.core.then
+import io.micrometer.core.instrument.MeterRegistry
 import org.http4k.routing.bind
 import org.http4k.routing.routes
 import org.jdbi.v3.core.Jdbi
@@ -38,6 +40,7 @@ object Routes {
         enrollmentRepository: EnrollmentRepository,
         playerRepository: PlayerRepository,
         playerCredentialRepository: PlayerCredentialRepository,
+        meterRegistry: MeterRegistry,
     ): HttpHandler {
         val enrollmentPollRoute = "/api/v1/enrollments/{enrollment_id}" bind Method.GET to
             EnrollmentBearerFilter(clock) { id ->
@@ -80,6 +83,7 @@ object Routes {
 
         return RequestLoggingFilter
             .then(ErrorHandlingFilter)
+            .then(MetricsFilter(meterRegistry))
             .then(app)
     }
 }

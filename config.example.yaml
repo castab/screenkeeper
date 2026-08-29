@@ -4,20 +4,16 @@ reconcile_interval: 30
 # Wait for webOS and HDMI services after a connection or power-on state update.
 power_on_delay: 15
 
-# Optional telemetry is activated only by `signage-controller run`.
-# Set LOKI_TOKEN and PROMETHEUS_TOKEN in the service environment before use.
-# observability:
-#   loki:
-#     url: https://loki.example.com/loki/api/v1/push
-#     bearer_token_env: LOKI_TOKEN
-#     labels:
-#       environment: production
-#   prometheus:
-#     remote_write_url: https://prometheus.example.com/api/v1/write
-#     bearer_token_env: PROMETHEUS_TOKEN
-#     job: signage_controller
-#     instance: signage-host-01
-#     push_interval: 15
+# Optional local Prometheus metrics, exposed only on this host (defaults to
+# 127.0.0.1) for a host-level agent such as Grafana Alloy to scrape. This
+# controller never sends metrics anywhere itself, and has no idea a central
+# Prometheus/Grafana exists. `signage-controller playback run` shares this
+# block but binds `port + 1`, since both commands can run on the same host.
+# See docs/architecture/observability.md.
+# metrics:
+#   enabled: true
+#   host: 127.0.0.1
+#   port: 9464
 
 tvs:
   - id: dev-tv

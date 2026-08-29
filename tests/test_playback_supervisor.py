@@ -269,3 +269,65 @@ async def test_run_playback_with_no_players_returns_immediately(tmp_path) -> Non
         run_playback(PlaybackConfig(players=()), stop_event, socket_dir=tmp_path),
         timeout=1.0,
     )
+
+
+class RecordingPlayerStatusReporter:
+    def __init__(self) -> None:
+        self.healthy: list[tuple[str, bool]] = []
+        self.restarts: list[str] = []
+
+    def record_player_healthy(self, player_id: str, *, healthy: bool) -> None:
+        self.healthy.append((player_id, healthy))
+
+    def record_player_restart(self, player_id: str) -> None:
+        self.restarts.append(player_id)
+
+
+@pytest.mark.asyncio
+async def test_supervisor_reports_healthy_and_restarts(tmp_path) -> None:
+    launcher = FakeProcessLauncher()
+    stop_event = asyncio.Event()
+    (tmp_path / "menu.mp4").write_bytes(b"fake")
+    reporter = RecordingPlayerStatusReporter()
+    supervisor = PlayerSupervisor(
+        _player(media=tmp_path / "menu.mp4"),
+        _playback(),
+        tmp_path / "dev-menu.sock",
+        launcher=launcher,
+        status_reporter=reporter,
+        **FAST_KWARGS,
+    )
+
+    task = asyncio.create_task(supervisor.run(stop_event))
+    await asyncio.sleep(0.05)
+    assert ("dev-menu", True) in reporter.healthy
+
+    launcher.processes[0].finish(1)
+    await asyncio.sleep(0.1)
+    assert ("dev-menu", False) in reporter.healthy
+    assert reporter.restarts == ["dev-menu"]
+
+    stop_event.set()
+    await task
+    assert reporter.healthy[-1] == ("dev-menu", False)
+
+
+@pytest.mark.asyncio
+async def test_supervisor_reports_unhealthy_while_media_missing(tmp_path) -> None:
+    stop_event = asyncio.Event()
+    reporter = RecordingPlayerStatusReporter()
+    supervisor = PlayerSupervisor(
+        _player(media=tmp_path / "missing.mp4"),
+        _playback(),
+        tmp_path / "dev-menu.sock",
+        launcher=FakeProcessLauncher(),
+        status_reporter=reporter,
+        **FAST_KWARGS,
+    )
+
+    task = asyncio.create_task(supervisor.run(stop_event))
+    await asyncio.sleep(0.05)
+    stop_event.set()
+    await task
+
+    assert reporter.healthy == [("dev-menu", False)]

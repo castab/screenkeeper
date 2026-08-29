@@ -124,9 +124,29 @@ their own throwaway database.
 | `SCREENKEEPER_ONLINE_MULTIPLIER` | no | `3` | `online = (now - last_seen_at) <= interval * multiplier` |
 | `SCREENKEEPER_ENROLLMENT_TTL_MINUTES` | no | `15` | Pairing code lifetime |
 | `SCREENKEEPER_ENROLLMENT_REAP_AFTER_MINUTES` | no | `60` | Grace period before an expired pending enrollment is deleted (410 -> 404) |
+| `SCREENKEEPER_CONTROL_METRICS_ENABLED` | no | `true` | Local Prometheus `/metrics` exposition |
+| `SCREENKEEPER_CONTROL_METRICS_HOST` | no | `127.0.0.1` | Bound on a separate listener from `SCREENKEEPER_CONTROL_PORT` -- see below |
+| `SCREENKEEPER_CONTROL_METRICS_PORT` | no | `9464` | |
 
 `online` is always computed at read time from `last_seen_at` -- it is never
 persisted as a boolean that could go stale.
+
+## Observability
+
+`/metrics` is served on its own listener (`SCREENKEEPER_CONTROL_METRICS_HOST`:
+`SCREENKEEPER_CONTROL_METRICS_PORT`), never on `SCREENKEEPER_CONTROL_PORT`.
+That distinction matters here specifically because, unlike an edge player,
+this server's public port is reachable over WAN -- every enrolled player's
+heartbeat reaches it directly, so metrics must never share that listener.
+This process holds no remote-write URL or credential of any kind; a
+host-level agent (e.g. Grafana Alloy) is expected to scrape this endpoint and
+own all outbound transport. See `docs/architecture/observability.md` at the
+repository root for the full architecture.
+
+```bash
+curl http://127.0.0.1:9464/metrics       # local Prometheus exposition
+curl -i http://localhost:8080/metrics    # 404 -- not served on the public port
+```
 
 ## Admin API walkthrough
 

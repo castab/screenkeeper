@@ -73,6 +73,9 @@ dependencies {
 
     implementation(libs.logback.classic)
 
+    implementation(libs.micrometer.core)
+    implementation(libs.micrometer.registry.prometheus)
+
     testImplementation(platform(libs.kotest.bom))
     testImplementation(libs.kotest.runner.junit5)
     testImplementation(libs.kotest.assertions.core)

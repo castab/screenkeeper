@@ -14,6 +14,8 @@ import com.screenkeeper.control.persistence.repository.OrganizationRepository
 import com.screenkeeper.control.persistence.repository.PlayerCredentialRepository
 import com.screenkeeper.control.persistence.repository.PlayerReportRepository
 import com.screenkeeper.control.persistence.repository.PlayerRepository
+import io.micrometer.prometheusmetrics.PrometheusConfig
+import io.micrometer.prometheusmetrics.PrometheusMeterRegistry
 import org.http4k.core.HttpHandler
 import org.jdbi.v3.core.Jdbi
 import java.time.Clock
@@ -48,7 +50,12 @@ class TestApp(
         onlineMultiplier = onlineMultiplier,
         enrollmentTtlMinutes = enrollmentTtlMinutes,
         enrollmentReapAfterMinutes = 60,
+        metricsEnabled = true,
+        metricsHost = "127.0.0.1",
+        metricsPort = 0,
     )
+
+    val meterRegistry = PrometheusMeterRegistry(PrometheusConfig.DEFAULT)
 
     val enrollmentService = EnrollmentService(
         jdbi, config, clock, enrollmentRepository, playerRepository, playerCredentialRepository,
@@ -75,5 +82,6 @@ class TestApp(
         enrollmentRepository = enrollmentRepository,
         playerRepository = playerRepository,
         playerCredentialRepository = playerCredentialRepository,
+        meterRegistry = meterRegistry,
     )
 }

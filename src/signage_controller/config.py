@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -13,15 +12,12 @@ import yaml
 
 DEFAULT_RECONCILE_INTERVAL = 30.0
 DEFAULT_POWER_ON_DELAY = 15.0
-DEFAULT_PUSH_INTERVAL = 15.0
-DEFAULT_PROMETHEUS_JOB = "signage_controller"
+DEFAULT_METRICS_PORT = 9464
 DEFAULT_RESTART_DELAY = 2.0
 DEFAULT_HWDEC = "auto"
 DEFAULT_MPV_BINARY = "mpv"
 DEFAULT_HEARTBEAT_INTERVAL = 30.0
 DEFAULT_CONTROL_PLANE_TIMEOUT = 10.0
-ENVIRONMENT_VARIABLE_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-LOKI_LABEL_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 # Plain HTTP to one of these is a developer talking to a control plane on their
 # own machine, where there is no network for anyone to intercept.
 LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
@@ -68,31 +64,17 @@ class PlaybackConfig:
 
 
 @dataclass(frozen=True, slots=True)
-class LokiConfig:
-    """Optional Loki log-shipping configuration."""
+class MetricsConfig:
+    """Optional local Prometheus exposition.
 
-    url: str
-    bearer_token_env: str
-    labels: tuple[tuple[str, str], ...] = ()
+    Screenkeeper never sends metrics anywhere itself. This only controls
+    whether a `/metrics` endpoint is exposed for a host-level agent (e.g.
+    Grafana Alloy) to pull from; it carries no remote URL or credential.
+    """
 
-
-@dataclass(frozen=True, slots=True)
-class PrometheusConfig:
-    """Optional Prometheus remote-write configuration."""
-
-    remote_write_url: str
-    bearer_token_env: str
-    job: str = DEFAULT_PROMETHEUS_JOB
-    instance: str | None = None
-    push_interval: float = DEFAULT_PUSH_INTERVAL
-
-
-@dataclass(frozen=True, slots=True)
-class ObservabilityConfig:
-    """Optional run-time telemetry configuration."""
-
-    loki: LokiConfig | None = None
-    prometheus: PrometheusConfig | None = None
+    enabled: bool = True
+    host: str = "127.0.0.1"
+    port: int = DEFAULT_METRICS_PORT
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,7 +98,7 @@ class ApplicationConfig:
     tvs: tuple[TvConfig, ...]
     reconcile_interval: float = DEFAULT_RECONCILE_INTERVAL
     power_on_delay: float = DEFAULT_POWER_ON_DELAY
-    observability: ObservabilityConfig = ObservabilityConfig()
+    metrics: MetricsConfig | None = None
     playback: PlaybackConfig | None = None
     control_plane: ControlPlaneConfig | None = None
 
@@ -168,7 +150,7 @@ def load_config(path: Path) -> ApplicationConfig:
         "power_on_delay",
         allow_zero=True,
     )
-    observability = _parse_observability(raw.get("observability"))
+    metrics = _parse_metrics(raw.get("metrics"))
 
     tvs = tuple(_parse_tv(entry, index) for index, entry in enumerate(tv_entries, start=1))
     ids = [tv.id for tv in tvs]
@@ -185,7 +167,7 @@ def load_config(path: Path) -> ApplicationConfig:
         tvs=tvs,
         reconcile_interval=reconcile_interval,
         power_on_delay=power_on_delay,
-        observability=observability,
+        metrics=metrics,
         playback=playback,
         control_plane=control_plane,
     )
@@ -340,85 +322,29 @@ def _parse_player(
     )
 
 
-def _parse_observability(raw: Any) -> ObservabilityConfig:
-    if raw is None:
-        return ObservabilityConfig()
-    if not isinstance(raw, dict):
-        raise ConfigurationError("'observability' must be a mapping.")
+def _parse_metrics(raw: Any) -> MetricsConfig | None:
+    """Parse the optional local `/metrics` block.
 
-    return ObservabilityConfig(
-        loki=_parse_loki(raw.get("loki")),
-        prometheus=_parse_prometheus(raw.get("prometheus")),
-    )
-
-
-def _parse_loki(raw: Any) -> LokiConfig | None:
+    Absence of the whole block means metrics are off, matching the
+    `playback`/`control_plane` convention elsewhere in this file. Presence of
+    the block with no explicit `enabled` means the operator wants it on.
+    """
     if raw is None:
         return None
     if not isinstance(raw, dict):
-        raise ConfigurationError("'observability.loki' must be a mapping.")
+        raise ConfigurationError("'metrics' must be a mapping.")
 
-    labels_raw = raw.get("labels", {})
-    if not isinstance(labels_raw, dict):
-        raise ConfigurationError("'observability.loki.labels' must be a mapping of strings.")
-    labels: list[tuple[str, str]] = []
-    reserved_labels = {"service", "instance", "level", "tv_id"}
-    for name, value in labels_raw.items():
-        if not isinstance(name, str) or not LOKI_LABEL_RE.fullmatch(name):
-            raise ConfigurationError(
-                "'observability.loki.labels' keys must be valid Loki label names."
-            )
-        if name in reserved_labels:
-            raise ConfigurationError(
-                f"'observability.loki.labels.{name}' is reserved by the controller."
-            )
-        if not isinstance(value, str):
-            raise ConfigurationError("'observability.loki.labels' values must be strings.")
-        labels.append((name, value))
+    enabled = _parse_bool(raw.get("enabled", True), "metrics.enabled")
 
-    return LokiConfig(
-        url=_parse_url(raw.get("url"), "observability.loki.url"),
-        bearer_token_env=_parse_environment_variable(
-            raw.get("bearer_token_env"), "observability.loki.bearer_token_env"
-        ),
-        labels=tuple(sorted(labels)),
-    )
+    host = raw.get("host", "127.0.0.1")
+    if not isinstance(host, str) or not host.strip():
+        raise ConfigurationError("'metrics.host' must be a non-empty string.")
 
+    port = raw.get("port", DEFAULT_METRICS_PORT)
+    if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
+        raise ConfigurationError("'metrics.port' must be an integer from 1 to 65535.")
 
-def _parse_prometheus(raw: Any) -> PrometheusConfig | None:
-    if raw is None:
-        return None
-    if not isinstance(raw, dict):
-        raise ConfigurationError("'observability.prometheus' must be a mapping.")
-
-    job = raw.get("job", DEFAULT_PROMETHEUS_JOB)
-    if not isinstance(job, str) or not job.strip():
-        raise ConfigurationError("'observability.prometheus.job' must be a non-empty string.")
-    instance = raw.get("instance")
-    if instance is not None and (not isinstance(instance, str) or not instance.strip()):
-        raise ConfigurationError("'observability.prometheus.instance' must be a non-empty string.")
-
-    if "pushgateway_url" in raw:
-        raise ConfigurationError(
-            "'observability.prometheus.pushgateway_url' is no longer supported; "
-            "use 'remote_write_url'."
-        )
-
-    return PrometheusConfig(
-        remote_write_url=_parse_url(
-            raw.get("remote_write_url"), "observability.prometheus.remote_write_url"
-        ),
-        bearer_token_env=_parse_environment_variable(
-            raw.get("bearer_token_env"), "observability.prometheus.bearer_token_env"
-        ),
-        job=job.strip(),
-        instance=instance.strip() if instance else None,
-        push_interval=_parse_seconds(
-            raw.get("push_interval", DEFAULT_PUSH_INTERVAL),
-            "observability.prometheus.push_interval",
-            allow_zero=False,
-        ),
-    )
+    return MetricsConfig(enabled=enabled, host=host.strip(), port=port)
 
 
 def _parse_control_plane(raw: Any) -> ControlPlaneConfig | None:
@@ -480,27 +406,3 @@ def _parse_base_url(value: Any, name: str, *, allow_insecure_http: bool) -> str:
             "development."
         )
     raise ConfigurationError(f"'{name}' must be an HTTPS URL.")
-
-
-def _parse_url(value: Any, name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
-        raise ConfigurationError(f"'{name}' must be a non-empty HTTPS URL.")
-    value = value.strip()
-    parsed = urlsplit(value)
-    try:
-        port = parsed.port
-    except ValueError as err:
-        raise ConfigurationError(f"'{name}' must be a valid HTTPS URL.") from err
-    if (
-        parsed.scheme != "https"
-        or not parsed.hostname
-        or (port is not None and not 1 <= port <= 65535)
-    ):
-        raise ConfigurationError(f"'{name}' must be a non-empty HTTPS URL.")
-    return value
-
-
-def _parse_environment_variable(value: Any, name: str) -> str:
-    if not isinstance(value, str) or not ENVIRONMENT_VARIABLE_RE.fullmatch(value):
-        raise ConfigurationError(f"'{name}' must be a valid environment variable name.")
-    return value

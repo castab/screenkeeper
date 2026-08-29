@@ -1,0 +1,133 @@
+// Grafana Alloy configuration for a Screenkeeper Edge (player) host.
+//
+// One Alloy instance runs per host, as its own systemd service, independent
+// of Screenkeeper's own units -- see deploy/alloy/README.md. It:
+//   1. scrapes the local Prometheus endpoints Screenkeeper exposes
+//   2. scrapes curated host metrics
+//   3. attaches player/location identity, if this host is enrolled
+//   4. remote_writes everything to a central Prometheus-compatible backend
+//   5. exposes a local OTLP receiver, ready for future use (inert for now)
+//
+// Every value that names the central backend or carries a credential comes
+// from Alloy's own environment (sys.env()) -- Screenkeeper never sees it, and
+// this file has no default for it: an operator must set it before Alloy can
+// export anything. Screenkeeper keeps running with or without Alloy present.
+
+// ---------------------------------------------------------------------------
+// Screenkeeper application metrics
+// ---------------------------------------------------------------------------
+
+discovery.relabel "screenkeeper" {
+	targets = [
+		// `signage-controller run`. Absent/unreachable if metrics are disabled
+		// or the process isn't running -- a normal, harmless scrape failure.
+		{"__address__" = "127.0.0.1:9464", "job" = "signage_controller"},
+		// `signage-controller playback run` binds metrics.port + 1.
+		{"__address__" = "127.0.0.1:9465", "job" = "signage_controller_playback"},
+	]
+
+	rule {
+		target_label = "instance"
+		replacement  = sys.env("HOSTNAME")
+	}
+}
+
+prometheus.scrape "screenkeeper" {
+	targets         = discovery.relabel.screenkeeper.output
+	scrape_interval = "15s"
+	forward_to      = [prometheus.relabel.identity.receiver]
+}
+
+// ---------------------------------------------------------------------------
+// Host metrics -- a curated set, not everything node_exporter can expose.
+// Answers: is this host resource-constrained, filling up disk, or silent?
+// ---------------------------------------------------------------------------
+
+prometheus.exporter.unix "host" {
+	set_collectors = ["cpu", "meminfo", "diskstats", "filesystem", "loadavg", "netdev", "uptime"]
+}
+
+prometheus.scrape "host" {
+	targets         = prometheus.exporter.unix.host.targets
+	scrape_interval = "30s"
+	forward_to      = [prometheus.relabel.identity.receiver]
+}
+
+// ---------------------------------------------------------------------------
+// Player/location identity enrichment.
+//
+// SCREENKEEPER_PLAYER_ID / _LOCATION_ID / _ORGANIZATION_ID are populated by
+// render-identity-env.sh from this host's device.json, loaded into Alloy's
+// own environment via EnvironmentFile= (see deploy/alloy/README.md). Before
+// enrollment, or if that file is absent, sys.env() returns "" -- Alloy still
+// starts, still scrapes, and still exports; the fleet-identity labels are
+// just empty until the player is enrolled.
+// ---------------------------------------------------------------------------
+
+prometheus.relabel "identity" {
+	forward_to = [prometheus.remote_write.central.receiver]
+
+	rule {
+		target_label = "screenkeeper_player_id"
+		replacement  = sys.env("SCREENKEEPER_PLAYER_ID")
+	}
+	rule {
+		target_label = "screenkeeper_location_id"
+		replacement  = sys.env("SCREENKEEPER_LOCATION_ID")
+	}
+	rule {
+		target_label = "screenkeeper_organization_id"
+		replacement  = sys.env("SCREENKEEPER_ORGANIZATION_ID")
+	}
+	rule {
+		target_label = "environment"
+		replacement  = sys.env("SCREENKEEPER_ENVIRONMENT")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Central export. The URL and credentials are deployment configuration that
+// belongs to Alloy, never to Screenkeeper -- see the boundary table in
+// docs/architecture/observability.md.
+// ---------------------------------------------------------------------------
+
+prometheus.remote_write "central" {
+	endpoint {
+		url = sys.env("METRICS_REMOTE_WRITE_URL")
+
+		basic_auth {
+			username = sys.env("METRICS_REMOTE_WRITE_USERNAME")
+			password = sys.env("METRICS_REMOTE_WRITE_PASSWORD")
+		}
+
+		// Alloy's own WAL/retry/buffering absorbs a WAN outage; nothing in
+		// Screenkeeper needs to retry or buffer telemetry itself.
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Local OTLP receiver. Nothing on this host emits OTLP today (deferred --
+// see docs/architecture/observability.md), so this proves the local OTLP
+// contract (http://127.0.0.1:4318, 127.0.0.1:4317) is ready for a future
+// application to use without any Alloy reconfiguration. Any OTLP metrics
+// received flow into the same central Prometheus destination as everything
+// above; traces/logs have no destination yet -- wiring one is future work,
+// not required for this receiver to exist and accept connections today.
+// ---------------------------------------------------------------------------
+
+otelcol.receiver.otlp "default" {
+	grpc {
+		endpoint = "127.0.0.1:4317"
+	}
+	http {
+		endpoint = "127.0.0.1:4318"
+	}
+
+	output {
+		metrics = [otelcol.exporter.prometheus.default.input]
+	}
+}
+
+otelcol.exporter.prometheus "default" {
+	forward_to = [prometheus.relabel.identity.receiver]
+}
