@@ -1,0 +1,61 @@
+name: Control CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_DB: screenkeeper_control
+          POSTGRES_USER: screenkeeper
+          POSTGRES_PASSWORD: ci-password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U screenkeeper -d screenkeeper_control"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    defaults:
+      run:
+        working-directory: control
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 25 (Temurin)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "25"
+
+      - name: Gradle unit tests and checks
+        run: ./gradlew check --console=plain
+
+      - name: Gradle integration tests (against the Postgres service container)
+        env:
+          SCREENKEEPER_TEST_DATABASE_URL: jdbc:postgresql://localhost:5432/screenkeeper_control
+          SCREENKEEPER_TEST_DATABASE_USER: screenkeeper
+          SCREENKEEPER_TEST_DATABASE_PASSWORD: ci-password
+        run: ./gradlew integrationTest --console=plain
+
+      - name: Docker image build smoke test
+        run: docker build -t screenkeeper-control:ci .

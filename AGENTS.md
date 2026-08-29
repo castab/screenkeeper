@@ -22,9 +22,17 @@ intentionally kept architecturally independent — see Behavioral Invariants
 below.
 
 This repository is a monorepo. The player application stays at the repository
-root; `contracts/` holds the shared API contract, and `control/` will hold the
+root; `contracts/` holds the shared API contract, and `control/` holds the
 Screenkeeper Control application. The two applications depend on the contract,
 never on each other's modules, so they remain independently deployable.
+
+`control/` is the Screenkeeper Control server: Kotlin/Gradle, http4k, Jdbi,
+Flyway, PostgreSQL (see `control/AGENTS.md` and `control/README.md`). It
+implements `contracts/openapi.yaml` as the server side. Unlike the player,
+`control/` is expected to run in Docker for development and deployment
+(`control/Dockerfile`, `control/compose.dev.yaml`) -- the "deliberately not
+containerized" invariant below is about the player only and does not extend
+to `control/`.
 
 Keep the project deliberately boring and reliable. Prefer standard-library
 Python, asyncio, explicit YAML configuration, local network/host control, and

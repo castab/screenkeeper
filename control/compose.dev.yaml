@@ -1,0 +1,45 @@
+# Local development stack: PostgreSQL + Screenkeeper Control only.
+# The Screenkeeper Edge/mpv player is never containerized and never belongs
+# in this file -- it runs natively on the signage host and points its
+# control_plane.base_url at this stack (http://localhost:8080).
+#
+# Usage:
+#   cp .env.example .env   # then edit .env with your own values
+#   docker compose -f compose.dev.yaml up -d
+
+services:
+  postgres:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_DB: screenkeeper_control
+      POSTGRES_USER: screenkeeper
+      POSTGRES_PASSWORD: ${SCREENKEEPER_DATABASE_PASSWORD:?set SCREENKEEPER_DATABASE_PASSWORD in .env, see .env.example}
+    ports:
+      - "5432:5432"
+    volumes:
+      - screenkeeper_control_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U screenkeeper -d screenkeeper_control"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  screenkeeper-control:
+    build: .
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      SCREENKEEPER_CONTROL_HOST: 0.0.0.0
+      SCREENKEEPER_CONTROL_PORT: "8080"
+      SCREENKEEPER_DATABASE_URL: jdbc:postgresql://postgres:5432/screenkeeper_control
+      SCREENKEEPER_DATABASE_USER: screenkeeper
+      SCREENKEEPER_DATABASE_PASSWORD: ${SCREENKEEPER_DATABASE_PASSWORD:?set SCREENKEEPER_DATABASE_PASSWORD in .env}
+      SCREENKEEPER_ADMIN_TOKEN: ${SCREENKEEPER_ADMIN_TOKEN:?set your own admin token in .env -- never commit it}
+      SCREENKEEPER_HEARTBEAT_INTERVAL_SECONDS: "30"
+      SCREENKEEPER_ONLINE_MULTIPLIER: "3"
+    ports:
+      - "8080:8080"
+
+volumes:
+  screenkeeper_control_pgdata:

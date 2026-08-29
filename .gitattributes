@@ -7,6 +7,10 @@
 *.service text eol=lf
 *.timer text eol=lf
 
+# The Gradle wrapper script for control/ is a bash script with no extension;
+# CI runs it on ubuntu-latest, which rejects a CRLF shebang line.
+control/gradlew text eol=lf
+
 # EDID test fixtures are raw display bytes; line-ending normalization would
 # corrupt them and break their checksums.
 *.bin binary
