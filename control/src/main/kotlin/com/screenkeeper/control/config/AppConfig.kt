@@ -13,6 +13,9 @@ data class AppConfig(
     val onlineMultiplier: Double,
     val enrollmentTtlMinutes: Long,
     val enrollmentReapAfterMinutes: Long,
+    val metricsEnabled: Boolean,
+    val metricsHost: String,
+    val metricsPort: Int,
 ) {
     companion object {
         // Not an env var: this is a protocol constant advertised to every
@@ -35,6 +38,12 @@ data class AppConfig(
                 onlineMultiplier = env["SCREENKEEPER_ONLINE_MULTIPLIER"]?.toDoubleOrNull() ?: 3.0,
                 enrollmentTtlMinutes = env["SCREENKEEPER_ENROLLMENT_TTL_MINUTES"]?.toLongOrNull() ?: 15L,
                 enrollmentReapAfterMinutes = env["SCREENKEEPER_ENROLLMENT_REAP_AFTER_MINUTES"]?.toLongOrNull() ?: 60L,
+                // Local-only Prometheus exposition for a host agent to scrape. Unlike
+                // `port` above (reachable over WAN from edge heartbeats), this never
+                // shares a listener with the public API -- see Main.kt.
+                metricsEnabled = env["SCREENKEEPER_CONTROL_METRICS_ENABLED"]?.toBooleanStrictOrNull() ?: true,
+                metricsHost = env["SCREENKEEPER_CONTROL_METRICS_HOST"]?.takeIf { it.isNotBlank() } ?: "127.0.0.1",
+                metricsPort = env["SCREENKEEPER_CONTROL_METRICS_PORT"]?.toIntOrNull() ?: 9464,
             )
         }
     }
@@ -42,5 +51,6 @@ data class AppConfig(
     override fun toString(): String =
         "AppConfig(host=$host, port=$port, databaseUrl=$databaseUrl, databaseUser=$databaseUser, " +
             "heartbeatIntervalSeconds=$heartbeatIntervalSeconds, onlineMultiplier=$onlineMultiplier, " +
-            "enrollmentTtlMinutes=$enrollmentTtlMinutes, enrollmentReapAfterMinutes=$enrollmentReapAfterMinutes)"
+            "enrollmentTtlMinutes=$enrollmentTtlMinutes, enrollmentReapAfterMinutes=$enrollmentReapAfterMinutes, " +
+            "metricsEnabled=$metricsEnabled, metricsHost=$metricsHost, metricsPort=$metricsPort)"
 }

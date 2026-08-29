@@ -55,21 +55,13 @@ def test_load_config_rejects_duplicate_ids(tmp_path) -> None:
         load_config(path)
 
 
-def test_load_config_parses_optional_observability(tmp_path) -> None:
+def test_load_config_parses_optional_metrics(tmp_path) -> None:
     path = tmp_path / "config.yaml"
     path.write_text(
-        """observability:
-  loki:
-    url: https://loki.example.com/loki/api/v1/push
-    bearer_token_env: LOKI_TOKEN
-    labels:
-      environment: production
-  prometheus:
-    remote_write_url: https://prometheus.example.com/api/v1/write
-    bearer_token_env: PROMETHEUS_TOKEN
-    job: signage_controller
-    instance: signage-host-01
-    push_interval: 10
+        """metrics:
+  enabled: true
+  host: 0.0.0.0
+  port: 9999
 tvs:
   - id: left
     name: Left Menu
@@ -82,23 +74,34 @@ tvs:
 
     config = load_config(path)
 
-    assert config.observability.loki is not None
-    assert config.observability.loki.bearer_token_env == "LOKI_TOKEN"
-    assert config.observability.loki.labels == (("environment", "production"),)
-    assert config.observability.prometheus is not None
-    assert config.observability.prometheus.bearer_token_env == "PROMETHEUS_TOKEN"
-    assert config.observability.prometheus.instance == "signage-host-01"
+    assert config.metrics is not None
+    assert config.metrics.enabled is True
+    assert config.metrics.host == "0.0.0.0"
+    assert config.metrics.port == 9999
 
 
-def test_load_config_rejects_reserved_loki_label(tmp_path) -> None:
+def test_load_config_metrics_absent_by_default(tmp_path) -> None:
     path = tmp_path / "config.yaml"
     path.write_text(
-        """observability:
-  loki:
-    url: https://loki.example.com/loki/api/v1/push
-    bearer_token_env: LOKI_TOKEN
-    labels:
-      tv_id: not-allowed
+        """tvs:
+  - id: left
+    name: Left Menu
+    host: 192.168.50.21
+    desired_input: HDMI_1
+    desired_volume: 0
+""",
+        encoding="utf-8",
+    )
+
+    config = load_config(path)
+
+    assert config.metrics is None
+
+
+def test_load_config_metrics_block_defaults_enabled_true(tmp_path) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        """metrics: {}
 tvs:
   - id: left
     name: Left Menu
@@ -109,17 +112,19 @@ tvs:
         encoding="utf-8",
     )
 
-    with pytest.raises(ConfigurationError, match="reserved"):
-        load_config(path)
+    config = load_config(path)
+
+    assert config.metrics is not None
+    assert config.metrics.enabled is True
+    assert config.metrics.host == "127.0.0.1"
+    assert config.metrics.port == 9464
 
 
-def test_load_config_rejects_cleartext_telemetry_url(tmp_path) -> None:
+def test_load_config_rejects_out_of_range_metrics_port(tmp_path) -> None:
     path = tmp_path / "config.yaml"
     path.write_text(
-        """observability:
-  loki:
-    url: http://loki.example.com/loki/api/v1/push
-    bearer_token_env: LOKI_TOKEN
+        """metrics:
+  port: 70000
 tvs:
   - id: left
     name: Left Menu
@@ -130,5 +135,5 @@ tvs:
         encoding="utf-8",
     )
 
-    with pytest.raises(ConfigurationError, match="HTTPS"):
+    with pytest.raises(ConfigurationError, match="metrics.port"):
         load_config(path)

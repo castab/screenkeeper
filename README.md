@@ -143,19 +143,11 @@ until the TV reports its real command ID:
 reconcile_interval: 30
 power_on_delay: 15
 
-# Optional: used only by `signage-controller run`.
-observability:
-  loki:
-    url: https://loki.example.com/loki/api/v1/push
-    bearer_token_env: LOKI_TOKEN
-    labels:
-      environment: production
-  prometheus:
-    remote_write_url: https://prometheus.example.com/api/v1/write
-    bearer_token_env: PROMETHEUS_TOKEN
-    job: signage_controller
-    instance: signage-host-01
-    push_interval: 15
+# Optional local Prometheus metrics. See "Observability" below.
+metrics:
+  enabled: true
+  host: 127.0.0.1
+  port: 9464
 
 tvs:
   - id: dev-tv
@@ -271,7 +263,7 @@ is the periodic correctness fallback after the initial reconciliation.
 `power_on_delay` is a non-negative number of seconds. It defaults to `15` and
 is used after each successful connection and an observed off-to-on state change.
 
-The optional `playback:`, `observability:`, and `control_plane:` sections are
+The optional `playback:`, `metrics:`, and `control_plane:` sections are
 documented in their own sections below. Omitting any of them preserves the
 behavior described above exactly.
 
@@ -615,7 +607,7 @@ the control plane notice later that they disagree — a display swapped, or a
 player bound to a connector that no longer exists.
 
 The configured half is assembled from an allowlist, so it never carries LG
-client keys, the device token, observability credentials, or local media paths.
+client keys, the device token, metrics configuration, or local media paths.
 What a player *plays* is not reported.
 
 A heartbeat is a snapshot of the present, not an event log.
@@ -660,64 +652,34 @@ control releases never need to match versions.
 
 ## Observability
 
-Telemetry is optional and is active only for the long-running `run` command.
-Commissioning commands (`pair`, `status`, `inputs`, and `apply`) keep their logs
-local and do not publish metrics. Loki and Prometheus Remote Write below cover
-TV control only; `playback run` does not yet publish player metrics —
-extending `PrometheusStatusReporter` with `player_id`-labeled gauges
-(`signage_controller_player_up`, `_restarts_total`,
-`_status_updated_timestamp_seconds`) is documented, low-risk follow-up work,
-not part of this phase.
+Screenkeeper produces telemetry locally; it never transports it anywhere. Both
+`signage-controller run` and `signage-controller playback run` can expose a
+local Prometheus `/metrics` endpoint, bound to `127.0.0.1` by default, for a
+host-level agent such as [Grafana Alloy](https://grafana.com/docs/alloy/) to
+scrape and forward. Screenkeeper holds no remote URL and no telemetry
+credential of any kind — see `docs/architecture/observability.md` for the full
+architecture, the host-agent setup, and the "Screenkeeper knows X, does not
+know Y" boundary. Commissioning commands (`pair`, `status`, `inputs`, `apply`)
+publish nothing; only the two long-running commands do, and only when
+`metrics.enabled` is true.
 
-### Loki Logs
+Set `metrics:` in `config.yaml`:
 
-Set `observability.loki.url` to Loki's `/loki/api/v1/push` endpoint and provide
-the name of an environment variable containing its bearer token in
-`bearer_token_env`. Telemetry endpoints must use HTTPS so bearer tokens are not
-sent in clear text. Enter tokens without placing them in shell history:
-
-```bash
-read -rsp "Loki token: " LOKI_TOKEN; printf '\n'
-export LOKI_TOKEN
+```yaml
+metrics:
+  enabled: true
+  host: 127.0.0.1
+  port: 9464
 ```
 
-The token is never written to logs. Loki shipping uses a bounded background
-queue, batches records, and retries delivery without blocking television
-control. Records include `service="signage-controller"`, the host `instance`,
-the log `level`, optional configured `labels`, and `tv_id` for controller logs.
-When Prometheus Remote Write is also configured, its `instance` value is used
-for Loki too, so dashboard queries identify one controller consistently. Loki
-receives only this application's logs; dependency protocol diagnostics are not
-shipped even with `--debug`.
-If delivery remains unavailable, the controller continues running and writes a
-local diagnostic to standard error.
+`run` binds `metrics.port` (default `9464`); `playback run` binds
+`metrics.port + 1` (default `9465`), since both commands read the same config
+file and commonly run on the same host. Omitting `metrics:` entirely, or
+setting `enabled: false`, disables the endpoint — the controller and playback
+supervisor behave identically either way; nothing about TV control or mpv
+playback depends on metrics being enabled, reachable, or scraped.
 
-### Prometheus Remote Write
-
-Set `observability.prometheus.remote_write_url` to the receiver's complete
-remote-write URL and set `bearer_token_env` to the name of its bearer-token
-environment variable:
-
-```bash
-read -rsp "Prometheus token: " PROMETHEUS_TOKEN; printf '\n'
-export PROMETHEUS_TOKEN
-signage-controller run
-```
-
-The target must be a Prometheus Remote Write receiver. For Prometheus itself,
-enable the receiver with `--web.enable-remote-write-receiver`; configuring
-Prometheus's outbound `remote_write` section alone is not sufficient. The
-controller sends the stable Remote Write 1.0 protobuf format with raw Snappy
-compression, bearer authentication, and the required protocol headers.
-
-`job` defaults to `signage_controller`; `instance` defaults to the controller
-host name when omitted. Both are attached as metric labels. Configure a stable,
-unique `instance` when multiple controller processes publish to one receiver.
-`push_interval` is a positive number of seconds and defaults to `15`. Status
-changes are written promptly and the full current status is also written at that
-interval.
-
-The controller publishes these gauges, each labeled by `tv_id` unless noted:
+`run` publishes these metrics, each labeled by `tv_id` unless noted:
 
 - `signage_controller_tv_connection_up`: `1` while webOS is connected and `0`
   after a connection loss or graceful controller shutdown.
@@ -726,19 +688,38 @@ The controller publishes these gauges, each labeled by `tv_id` unless noted:
 - `signage_controller_tv_volume`: the latest reported absolute volume.
 - `signage_controller_tv_input{tv_id,input_id}`: the latest reported input has
   value `1`.
-- `signage_controller_tv_status_updated_timestamp_seconds`: when the controller
-  last observed a connection or TV state update.
+- `signage_controller_tv_status_updated_timestamp_seconds`: when the
+  controller last observed a connection or TV state update.
+- `signage_controller_tv_commands_total{tv_id,command,result}`: TV commands
+  issued (`command` is `set_input` or `set_volume`; `result` is `success` or
+  `failure`).
+- `signage_controller_tv_command_duration_seconds{tv_id,command}`: TV command
+  latency.
+
+`playback run` publishes, labeled by `player_id`:
+
+- `signage_controller_player_up`: `1` while a player's mpv process is running
+  normally.
+- `signage_controller_player_restarts_total`: mpv restarts after an
+  unexpected exit.
+- `signage_controller_player_status_updated_timestamp_seconds`: when a
+  player's status was last observed.
+
+Both processes also expose the standard `prometheus_client` process
+collectors (`process_start_time_seconds`, `process_resident_memory_bytes`,
+etc.) with no extra code, which is enough to answer "when did this process
+last start" without a dedicated uptime metric.
 
 When a TV is unavailable, its last known power, input, and volume remain
 published while `connection_up` becomes `0`. Alert on both `connection_up` and
 the status-updated timestamp so an unreachable TV is not mistaken for a fresh
-observation. Remote-write delivery errors are logged and do not stop TV control.
+observation.
 
 `grafana/signage-controller-dashboard.json` is an importable dashboard for
-these metrics and the Loki logs. Grafana prompts for the Prometheus and Loki
-datasources during import; it includes controller and TV selectors,
-current-state summary, connection and power history, volume history, current
-input, and TV-scoped logs.
+these metrics. Grafana prompts for a Prometheus datasource during import; it
+includes controller/TV/player selectors, current-state summary, connection
+and power history, volume history, current input, playback state, and TV
+command outcomes.
 
 ## Logs and Recovery
 
@@ -764,7 +745,7 @@ unreachable, `run` remains alive and retries after 5, 10, 15, then capped
 30-second intervals.
 
 Routine "already configured; no change" input and volume messages are logged at
-`DEBUG` so normal logs and Loki dashboards emphasize state changes and failures.
+`DEBUG` so normal logs emphasize state changes and failures.
 After each connection or observed power-on settle delay, an `INFO` verification
 confirms that desired state has been reached and periodic monitoring is active.
 
@@ -794,8 +775,9 @@ signage-controller --debug run
 ```
 
 Debug output can include detailed TV and protocol information, so leave it off
-in normal operation. Loki ships the controller's own debug records but excludes
-dependency protocol logs.
+in normal operation. A host-level agent (e.g. Grafana Alloy) can tail these
+logs via systemd's journal without any Screenkeeper-side log shipping code;
+see `docs/architecture/observability.md`.
 
 ### Playback Logs
 
@@ -1042,7 +1024,7 @@ The suite uses no real TV. It covers:
 - Transient app-state callback filtering
 - Shutdown versus generic connection-loss logs
 - Single-controller runtime locking
-- Optional Loki log delivery and Prometheus Remote Write TV-status reporting
+- Local Prometheus `/metrics` exposition for TV and playback status
 - Playback configuration validation (players optional/absent, unique IDs,
   `screen`/`screen_name` mutual exclusion, `tv_id` cross-referencing,
   relative `media` resolution against the config file)

@@ -15,6 +15,7 @@ import tempfile
 from pathlib import Path
 
 from ..config import PlaybackConfig, PlayerConfig
+from ..observability import PlayerStatusReporter
 from .mpv import MpvPlayer, ProcessLauncher, default_launcher
 
 
@@ -58,6 +59,7 @@ class PlayerSupervisor:
         media_poll_interval: float = MEDIA_POLL_INTERVAL_SECONDS,
         restart_backoff_multipliers: tuple[float, ...] = RESTART_BACKOFF_MULTIPLIERS,
         healthy_reset_seconds: float = HEALTHY_RESET_SECONDS,
+        status_reporter: PlayerStatusReporter | None = None,
     ) -> None:
         self.player = player
         self.playback = playback
@@ -67,7 +69,12 @@ class PlayerSupervisor:
         self._media_poll_interval = media_poll_interval
         self._backoff = restart_backoff_multipliers
         self._healthy_reset_seconds = healthy_reset_seconds
+        self.status_reporter = status_reporter
         self._current_player: MpvPlayer | None = None
+
+    def _report_healthy(self, *, healthy: bool) -> None:
+        if self.status_reporter is not None:
+            self.status_reporter.record_player_healthy(self.player.id, healthy=healthy)
 
     async def run(self, stop_event: asyncio.Event) -> None:
         """Run until stopped, waiting on missing media and restarting on crash."""
@@ -93,6 +100,7 @@ class PlayerSupervisor:
                             self.player.media,
                         )
                         media_missing_logged = True
+                        self._report_healthy(healthy=False)
                     await self._wait_or_stop(stop_event, self._media_poll_interval)
                     continue
                 if media_missing_logged:
@@ -110,6 +118,7 @@ class PlayerSupervisor:
                 await mpv_player.start()
                 self._current_player = mpv_player
                 self.logger.info("%s: playback healthy", self.player.id)
+                self._report_healthy(healthy=True)
 
                 wait_task = asyncio.create_task(mpv_player.wait())
                 stop_task = asyncio.create_task(stop_event.wait())
@@ -123,6 +132,7 @@ class PlayerSupervisor:
                 if stop_task in done:
                     await mpv_player.stop()
                     self._current_player = None
+                    self._report_healthy(healthy=False)
                     return
 
                 self._current_player = None
@@ -140,6 +150,9 @@ class PlayerSupervisor:
                     f" (recent output: {tail})" if tail else "",
                 )
                 failure_streak += 1
+                self._report_healthy(healthy=False)
+                if self.status_reporter is not None:
+                    self.status_reporter.record_player_restart(self.player.id)
                 await self._wait_or_stop(stop_event, delay)
             except asyncio.CancelledError:
                 raise
@@ -153,12 +166,18 @@ class PlayerSupervisor:
                     round(delay, 1),
                 )
                 failure_streak += 1
+                self._report_healthy(healthy=False)
+                if self.status_reporter is not None:
+                    self.status_reporter.record_player_restart(self.player.id)
                 await self._wait_or_stop(stop_event, delay)
             except Exception:
                 # One unexpected supervisor bug must not end this or other players' tasks.
                 self.logger.exception("%s: unexpected playback supervisor failure", self.player.id)
                 delay = _restart_delay(self.playback.restart_delay, failure_streak, self._backoff)
                 failure_streak += 1
+                self._report_healthy(healthy=False)
+                if self.status_reporter is not None:
+                    self.status_reporter.record_player_restart(self.player.id)
                 await self._wait_or_stop(stop_event, delay)
 
     @staticmethod
@@ -173,6 +192,7 @@ async def run_playback(
     *,
     socket_dir: Path | None = None,
     launcher: ProcessLauncher = default_launcher,
+    status_reporter: PlayerStatusReporter | None = None,
 ) -> None:
     """Run an independent supervisor task for every configured player."""
     if not playback.players:
@@ -181,7 +201,11 @@ async def run_playback(
     resolved_socket_dir = socket_dir if socket_dir is not None else resolve_socket_dir()
     supervisors = [
         PlayerSupervisor(
-            player, playback, resolved_socket_dir / f"{player.id}.sock", launcher=launcher
+            player,
+            playback,
+            resolved_socket_dir / f"{player.id}.sock",
+            launcher=launcher,
+            status_reporter=status_reporter,
         )
         for player in playback.players
     ]

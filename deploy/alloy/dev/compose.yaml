@@ -1,0 +1,53 @@
+# Local observability dev stack: Alloy + Prometheus + Grafana only.
+#
+# The Screenkeeper player is never containerized (see the repository's
+# AGENTS.md) -- run it natively on this machine as usual
+# (`signage-controller run` / `playback run`) with `metrics.enabled: true`
+# in config.yaml. This stack's Alloy reaches it via host.docker.internal.
+#
+# Usage:
+#   docker compose -f deploy/alloy/dev/compose.yaml up
+#   open http://localhost:3000 (Grafana, admin/admin)
+#   open http://localhost:12345 (Alloy UI: component graph and health)
+#   open http://localhost:9090 (Prometheus)
+
+services:
+  alloy:
+    image: grafana/alloy:latest
+    command:
+      - run
+      - --server.http.listen-addr=0.0.0.0:12345
+      - --storage.path=/var/lib/alloy/data
+      - /etc/alloy/config.alloy
+    volumes:
+      - ./edge-dev.alloy:/etc/alloy/config.alloy:ro
+    ports:
+      - "12345:12345"  # Alloy UI
+      - "4317:4317"    # OTLP gRPC
+      - "4318:4318"    # OTLP HTTP
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  prometheus:
+    image: prom/prometheus:latest
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --web.enable-remote-write-receiver
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+
+  grafana:
+    image: grafana/grafana:latest
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+    volumes:
+      - ./grafana-datasources.yml:/etc/grafana/provisioning/datasources/datasources.yml:ro
+      - ./grafana-dashboards-provider.yml:/etc/grafana/provisioning/dashboards/provider.yml:ro
+      - ../../../grafana/signage-controller-dashboard.json:/var/lib/grafana/dashboards/signage-controller-dashboard.json:ro
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus

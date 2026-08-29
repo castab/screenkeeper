@@ -6,11 +6,9 @@ from pathlib import Path
 from signage_controller import __version__
 from signage_controller.config import (
     ApplicationConfig,
-    LokiConfig,
-    ObservabilityConfig,
+    MetricsConfig,
     PlaybackConfig,
     PlayerConfig,
-    PrometheusConfig,
     TvConfig,
 )
 from signage_controller.control_plane.report import (
@@ -109,23 +107,16 @@ def test_absent_playback_section_reports_an_empty_player_list() -> None:
     assert len(bindings["tvs"]) == 1
 
 
-def test_observability_credentials_never_reach_the_report() -> None:
-    """Telemetry config names environment variables; neither name nor value belongs here."""
-    config = _config(
-        observability=ObservabilityConfig(
-            loki=LokiConfig(url="https://loki.example.com/push", bearer_token_env="LOKI_TOKEN"),
-            prometheus=PrometheusConfig(
-                remote_write_url="https://prom.example.com/write",
-                bearer_token_env="PROMETHEUS_TOKEN",
-            ),
-        )
-    )
+def test_metrics_config_never_reaches_the_report() -> None:
+    """Local metrics configuration is not telemetry transport, but it still isn't the
+    control plane's business: the report only ever carries the allowlisted TV/playback
+    bindings, never any other configuration section."""
+    config = _config(metrics=MetricsConfig(enabled=True, host="0.0.0.0", port=9999))
 
     serialized = json.dumps(build_heartbeat(config, Inventory()))
 
-    assert "LOKI_TOKEN" not in serialized
-    assert "PROMETHEUS_TOKEN" not in serialized
-    assert "loki.example.com" not in serialized
+    assert "9999" not in serialized
+    assert "0.0.0.0" not in serialized
 
 
 def test_agent_info_reports_this_installation() -> None:

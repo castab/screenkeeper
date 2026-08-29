@@ -3,18 +3,10 @@
     {
       "name": "DS_PROMETHEUS",
       "label": "Prometheus",
-      "description": "Prometheus receiving the configured remote-write metrics.",
+      "description": "Prometheus receiving metrics forwarded by a host-level agent (e.g. Grafana Alloy) that scrapes signage-controller's local /metrics endpoint.",
       "type": "datasource",
       "pluginId": "prometheus",
       "pluginName": "Prometheus"
-    },
-    {
-      "name": "DS_LOKI",
-      "label": "Loki",
-      "description": "Loki receiving signage-controller logs.",
-      "type": "datasource",
-      "pluginId": "loki",
-      "pluginName": "Loki"
     }
   ],
   "__requires": [
@@ -23,12 +15,6 @@
       "id": "grafana",
       "name": "Grafana",
       "version": "10.0.0"
-    },
-    {
-      "type": "panel",
-      "id": "logs",
-      "name": "Logs",
-      "version": ""
     },
     {
       "type": "panel",
@@ -56,12 +42,6 @@
     },
     {
       "type": "datasource",
-      "id": "loki",
-      "name": "Loki",
-      "version": ""
-    },
-    {
-      "type": "datasource",
       "id": "prometheus",
       "name": "Prometheus",
       "version": ""
@@ -70,7 +50,7 @@
   "annotations": {
     "list": []
   },
-  "description": "TV availability, state, and controller logs published by signage-controller.",
+  "description": "TV and playback availability/state published by signage-controller's local Prometheus metrics.",
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
@@ -586,55 +566,132 @@
     },
     {
       "datasource": {
-        "type": "loki",
-        "uid": "${DS_LOKI}"
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
       },
       "fieldConfig": {
         "defaults": {
           "color": {
-            "mode": "thresholds"
+            "mode": "fixed"
           },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              }
-            ]
-          }
+          "mappings": [
+            {
+              "options": {
+                "0": {
+                  "color": "red",
+                  "text": "Not running"
+                },
+                "1": {
+                  "color": "green",
+                  "text": "Running"
+                }
+              },
+              "type": "value"
+            }
+          ]
         },
         "overrides": []
       },
       "gridPos": {
-        "h": 10,
-        "w": 24,
+        "h": 8,
+        "w": 12,
         "x": 0,
         "y": 20
       },
       "id": 9,
+      "maxDataPoints": 120,
       "options": {
-        "dedupStrategy": "none",
-        "enableLogDetails": true,
-        "prettifyJSON": false,
-        "showCommonLabels": false,
-        "showLabels": true,
-        "showTime": true,
-        "sortOrder": "Descending",
-        "wrapLogMessage": true
+        "alignValue": "center",
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "mergeValues": true,
+        "rowHeight": 0.9,
+        "showValue": "always",
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
       },
       "pluginVersion": "10.0.0",
       "targets": [
         {
           "editorMode": "code",
-          "expr": "{service=\"signage-controller\", instance=~\"$instance\", tv_id=~\"$tv_id\"}",
-          "queryType": "range",
+          "expr": "signage_controller_player_up{instance=~\"$instance\"}",
+          "legendFormat": "{{player_id}}",
+          "range": true,
           "refId": "A"
         }
       ],
-      "title": "Controller Logs",
-      "type": "logs"
+      "title": "Playback State Timeline",
+      "type": "state-timeline"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "mappings": [],
+          "unit": "none"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byFrameRefID",
+              "options": "failure"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "red",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 20
+      },
+      "id": 10,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "editorMode": "code",
+          "expr": "sum by (result) (rate(signage_controller_tv_commands_total{instance=~\"$instance\", tv_id=~\"$tv_id\"}[5m]))",
+          "legendFormat": "{{result}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "TV Command Outcomes (5m rate)",
+      "type": "stat"
     }
   ],
   "refresh": "30s",

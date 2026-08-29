@@ -21,7 +21,7 @@ from .control_plane.enrollment import enroll
 from .control_plane.identity import DeviceStore
 from .controller import DesiredInputError, converge, run_all
 from .inventory.drm import Inventory, collect_inventory
-from .observability import LokiHandler, ObservabilityError, PrometheusStatusReporter
+from .observability import MetricsServer, PrometheusMetricsReporter
 from .playback.mpv import MpvPlayer, build_mpv_argv, default_launcher
 from .playback.supervisor import resolve_socket_dir, run_playback
 from .runtime_lock import ControllerAlreadyRunningError, acquire_controller_lock
@@ -163,7 +163,7 @@ def main() -> None:
             exit_code = _run_update_command(args)
         else:
             exit_code = asyncio.run(_run(args))
-    except (ConfigurationError, ObservabilityError, StateStoreError, UpdateError) as err:
+    except (ConfigurationError, StateStoreError, UpdateError) as err:
         LOGGER.error("%s", err)
         exit_code = 2
     except KeyboardInterrupt:
@@ -433,14 +433,30 @@ async def _playback_run(config: ApplicationConfig, state_store: StateStore) -> i
         with contextlib.suppress(NotImplementedError):
             loop.add_signal_handler(signum, stop_event.set)
 
+    reporter: PrometheusMetricsReporter | None = None
+    metrics_server: MetricsServer | None = None
     try:
+        if config.metrics is not None and config.metrics.enabled:
+            reporter = PrometheusMetricsReporter(
+                player_ids=(player.id for player in playback.players)
+            )
+            # `run` and `playback run` read the same config.yaml and commonly run on
+            # the same host, so they cannot share one `metrics.port`. +1 keeps the
+            # config surface to a single 'metrics' block instead of a port per command.
+            metrics_server = MetricsServer(
+                reporter.registry, config.metrics.host, config.metrics.port + 1
+            )
+            await metrics_server.start()
         with acquire_controller_lock(
             state_store.state_dir, name="playback.lock", command="playback run"
         ):
-            await run_playback(playback, stop_event)
+            await run_playback(playback, stop_event, status_reporter=reporter)
     except ControllerAlreadyRunningError as err:
         LOGGER.error("%s", err)
         return 1
+    finally:
+        if metrics_server is not None:
+            await metrics_server.stop()
     return 0
 
 
@@ -747,30 +763,16 @@ async def _run_daemon(config: ApplicationConfig, state_store: StateStore) -> int
     def factory(tv_config: TvConfig, client_key: str | None) -> Television:
         return LgWebOsTelevision(tv_config.host, client_key)
 
-    root_logger = logging.getLogger()
-    loki_handler: LokiHandler | None = None
-    reporter: PrometheusStatusReporter | None = None
-    reporter_task: asyncio.Task[None] | None = None
-    runtime_started = False
+    reporter: PrometheusMetricsReporter | None = None
+    metrics_server: MetricsServer | None = None
     try:
-        if config.observability.loki is not None:
-            loki_handler = LokiHandler(
-                config.observability.loki,
-                instance=(
-                    config.observability.prometheus.instance
-                    if config.observability.prometheus is not None
-                    else None
-                ),
+        if config.metrics is not None and config.metrics.enabled:
+            reporter = PrometheusMetricsReporter(tv_ids=(tv.id for tv in config.tvs))
+            metrics_server = MetricsServer(
+                reporter.registry, config.metrics.host, config.metrics.port
             )
-            root_logger.addHandler(loki_handler)
-        if config.observability.prometheus is not None:
-            reporter = PrometheusStatusReporter(
-                config.observability.prometheus, (tv.id for tv in config.tvs)
-            )
+            await metrics_server.start()
         with acquire_controller_lock(state_store.state_dir):
-            runtime_started = True
-            if reporter is not None:
-                reporter_task = asyncio.create_task(reporter.run(stop_event))
             await run_all(
                 config.tvs,
                 state_store,
@@ -784,15 +786,10 @@ async def _run_daemon(config: ApplicationConfig, state_store: StateStore) -> int
         LOGGER.error("%s", err)
         return 1
     finally:
-        if runtime_started and reporter is not None:
+        if reporter is not None:
             reporter.mark_all_unavailable()
-            await reporter.push()
-            stop_event.set()
-            if reporter_task is not None:
-                await reporter_task
-        if loki_handler is not None:
-            root_logger.removeHandler(loki_handler)
-            loki_handler.close()
+        if metrics_server is not None:
+            await metrics_server.stop()
     return 0
 
 

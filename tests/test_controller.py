@@ -26,6 +26,7 @@ LOGGER = logging.getLogger("tests.controller")
 class RecordingStatusReporter:
     def __init__(self) -> None:
         self.updates: list[tuple[str, bool | None, TelevisionState | None]] = []
+        self.commands: list[tuple[str, str, bool]] = []
 
     def update(
         self,
@@ -35,6 +36,11 @@ class RecordingStatusReporter:
         state: TelevisionState | None = None,
     ) -> None:
         self.updates.append((tv_id, connected, state))
+
+    def record_command(
+        self, tv_id: str, command: str, *, success: bool, duration: float | None = None
+    ) -> None:
+        self.commands.append((tv_id, command, success))
 
 
 @pytest.mark.asyncio
@@ -63,6 +69,10 @@ async def test_converge_reports_observed_and_changed_status() -> None:
         ("dev-tv", None, TelevisionState(current_input="HDMI_2", volume=12)),
         ("dev-tv", None, TelevisionState(current_input="HDMI_1")),
         ("dev-tv", None, TelevisionState(volume=0)),
+    ]
+    assert reporter.commands == [
+        ("dev-tv", "set_input", True),
+        ("dev-tv", "set_volume", True),
     ]
 
 

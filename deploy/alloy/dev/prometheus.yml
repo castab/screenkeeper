@@ -1,0 +1,6 @@
+# Minimal local dev Prometheus: only accepts remote_write from dev Alloy.
+# Nothing here is scraped directly; Alloy owns all collection.
+global:
+  scrape_interval: 15s
+
+scrape_configs: []

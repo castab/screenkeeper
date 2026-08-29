@@ -5,8 +5,9 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from typing import Any
 
 from .config import TvConfig
 from .observability import StatusReporter
@@ -35,6 +36,30 @@ class ApplyResult:
     def changed(self) -> bool:
         """Whether convergence had to send any change command."""
         return self.input_changed or self.volume_changed
+
+
+async def _run_command(
+    command: Callable[[Any], Awaitable[None]],
+    value: Any,
+    tv_id: str,
+    name: str,
+    status_reporter: StatusReporter | None,
+) -> None:
+    """Run one TV command and record its outcome/latency without swallowing errors."""
+    start = asyncio.get_running_loop().time()
+    try:
+        await command(value)
+    except Exception:
+        if status_reporter is not None:
+            status_reporter.record_command(
+                tv_id, name, success=False, duration=asyncio.get_running_loop().time() - start
+            )
+        raise
+    else:
+        if status_reporter is not None:
+            status_reporter.record_command(
+                tv_id, name, success=True, duration=asyncio.get_running_loop().time() - start
+            )
 
 
 async def converge(
@@ -70,7 +95,7 @@ async def converge(
             current_input if current_input is not None else "unknown",
             config.desired_input,
         )
-        await tv.set_input(config.desired_input)
+        await _run_command(tv.set_input, config.desired_input, config.id, "set_input", status_reporter)
         if status_reporter is not None:
             status_reporter.update(
                 config.id, state=TelevisionState(current_input=config.desired_input)
@@ -84,7 +109,7 @@ async def converge(
             current_volume if current_volume is not None else "unknown",
             config.desired_volume,
         )
-        await tv.set_volume(config.desired_volume)
+        await _run_command(tv.set_volume, config.desired_volume, config.id, "set_volume", status_reporter)
         if status_reporter is not None:
             status_reporter.update(config.id, state=TelevisionState(volume=config.desired_volume))
     else:

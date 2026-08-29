@@ -1,0 +1,59 @@
+// Local development variant of ../edge.alloy: same shape, but points at the
+// dev Prometheus/Grafana stack in compose.yaml instead of a real central
+// backend, and reaches the natively-running signage-controller process via
+// host.docker.internal instead of 127.0.0.1 (Alloy itself runs in a
+// container here; in production it runs natively on the host, where
+// 127.0.0.1 is correct -- see ../edge.alloy).
+//
+// No real credentials required. Run: docker compose -f compose.yaml up
+
+discovery.relabel "screenkeeper" {
+	targets = [
+		{"__address__" = "host.docker.internal:9464", "job" = "signage_controller"},
+		{"__address__" = "host.docker.internal:9465", "job" = "signage_controller_playback"},
+	]
+
+	rule {
+		target_label = "instance"
+		replacement  = "dev-host"
+	}
+}
+
+prometheus.scrape "screenkeeper" {
+	targets         = discovery.relabel.screenkeeper.output
+	scrape_interval = "15s"
+	forward_to      = [prometheus.remote_write.dev.receiver]
+}
+
+prometheus.exporter.unix "host" {
+	set_collectors = ["cpu", "meminfo", "diskstats", "filesystem", "loadavg", "netdev", "uptime"]
+}
+
+prometheus.scrape "host" {
+	targets         = prometheus.exporter.unix.host.targets
+	scrape_interval = "30s"
+	forward_to      = [prometheus.remote_write.dev.receiver]
+}
+
+prometheus.remote_write "dev" {
+	endpoint {
+		url = "http://prometheus:9090/api/v1/write"
+	}
+}
+
+otelcol.receiver.otlp "default" {
+	grpc {
+		endpoint = "0.0.0.0:4317"
+	}
+	http {
+		endpoint = "0.0.0.0:4318"
+	}
+
+	output {
+		metrics = [otelcol.exporter.prometheus.default.input]
+	}
+}
+
+otelcol.exporter.prometheus "default" {
+	forward_to = [prometheus.remote_write.dev.receiver]
+}
