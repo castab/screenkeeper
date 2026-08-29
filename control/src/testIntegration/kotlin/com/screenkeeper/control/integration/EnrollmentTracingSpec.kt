@@ -84,4 +84,48 @@ class EnrollmentTracingSpec : FunSpec({
         createSpans shouldHaveSize 2
         createSpans.last().status.statusCode shouldBe StatusCode.ERROR
     }
+
+    test("a successful enrollment and claim each increment their success counter") {
+        val app = TestApp()
+        val org = app.organizationService.create("Example Restaurant")
+        val location = app.locationService.create(org.id, "Downtown")
+
+        val ticket = app.enrollmentService.createOrReuse(UUID.randomUUID(), "a".repeat(43), "0.1.0", "host")
+        app.enrollmentService.claim(ticket.code, location.id, "Main Menu Wall")
+
+        app.meterRegistry.find("screenkeeper.enrollment.create_or_reuse")
+            .tags("result", "success").counter()?.count() shouldBe 1.0
+        app.meterRegistry.find("screenkeeper.enrollment.claim")
+            .tags("result", "success").counter()?.count() shouldBe 1.0
+    }
+
+    test("a rejected claim increments the counter tagged with the domain error code") {
+        val app = TestApp()
+        val ticket = app.enrollmentService.createOrReuse(UUID.randomUUID(), "a".repeat(43), "0.1.0", "host")
+
+        shouldThrow<DomainError.LocationNotFound> {
+            app.enrollmentService.claim(ticket.code, UUID.randomUUID(), "Main Menu Wall")
+        }
+
+        app.meterRegistry.find("screenkeeper.enrollment.claim")
+            .tags("result", "location_not_found").counter()?.count() shouldBe 1.0
+        app.meterRegistry.find("screenkeeper.enrollment.claim")
+            .tags("result", "success").counter() shouldBe null
+    }
+
+    test("re-enrolling an already-claimed installation increments the already_enrolled counter") {
+        val app = TestApp()
+        val org = app.organizationService.create("Example Restaurant")
+        val location = app.locationService.create(org.id, "Downtown")
+        val installationId = UUID.randomUUID()
+        val ticket = app.enrollmentService.createOrReuse(installationId, "a".repeat(43), "0.1.0", "host")
+        app.enrollmentService.claim(ticket.code, location.id, "Main Menu Wall")
+
+        shouldThrow<DomainError.AlreadyEnrolled> {
+            app.enrollmentService.createOrReuse(installationId, "a".repeat(43), "0.1.0", "host")
+        }
+
+        app.meterRegistry.find("screenkeeper.enrollment.create_or_reuse")
+            .tags("result", "already_enrolled").counter()?.count() shouldBe 1.0
+    }
 })
