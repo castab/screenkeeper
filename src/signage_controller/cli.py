@@ -26,6 +26,7 @@ from .playback.mpv import MpvPlayer, build_mpv_argv, default_launcher
 from .playback.supervisor import resolve_socket_dir, run_playback
 from .runtime_lock import ControllerAlreadyRunningError, acquire_controller_lock
 from .state_store import StateStore, StateStoreError
+from .tracing import configure_tracing
 from .tv.base import Television, TelevisionError
 from .tv.lg_webos import LgWebOsTelevision
 from .updater import (
@@ -435,6 +436,7 @@ async def _playback_run(config: ApplicationConfig, state_store: StateStore) -> i
 
     reporter: PrometheusMetricsReporter | None = None
     metrics_server: MetricsServer | None = None
+    tracing_handle = configure_tracing("signage-controller-playback", config.tracing)
     try:
         if config.metrics is not None and config.metrics.enabled:
             reporter = PrometheusMetricsReporter(
@@ -450,13 +452,16 @@ async def _playback_run(config: ApplicationConfig, state_store: StateStore) -> i
         with acquire_controller_lock(
             state_store.state_dir, name="playback.lock", command="playback run"
         ):
-            await run_playback(playback, stop_event, status_reporter=reporter)
+            await run_playback(
+                playback, stop_event, status_reporter=reporter, tracer=tracing_handle.tracer
+            )
     except ControllerAlreadyRunningError as err:
         LOGGER.error("%s", err)
         return 1
     finally:
         if metrics_server is not None:
             await metrics_server.stop()
+        tracing_handle.shutdown()
     return 0
 
 
@@ -624,14 +629,37 @@ async def _agent_run(config: ApplicationConfig, state_store: StateStore) -> int:
         with contextlib.suppress(NotImplementedError):
             loop.add_signal_handler(signum, stop_event.set)
 
+    reporter: PrometheusMetricsReporter | None = None
+    metrics_server: MetricsServer | None = None
+    tracing_handle = configure_tracing("signage-controller-agent", config.tracing)
     try:
+        if config.metrics is not None and config.metrics.enabled:
+            reporter = PrometheusMetricsReporter(control_plane=True)
+            # `run` binds metrics.port, `playback run` binds +1; +2 keeps the
+            # config surface to a single 'metrics' block instead of a port per command.
+            metrics_server = MetricsServer(
+                reporter.registry, config.metrics.host, config.metrics.port + 2
+            )
+            await metrics_server.start()
         with acquire_controller_lock(
             state_store.state_dir, name="agent.lock", command="agent run"
         ):
-            await run_agent(config, control_plane, device_store, identity, stop_event)
+            await run_agent(
+                config,
+                control_plane,
+                device_store,
+                identity,
+                stop_event,
+                status_reporter=reporter,
+                tracer=tracing_handle.tracer,
+            )
     except ControllerAlreadyRunningError as err:
         LOGGER.error("%s", err)
         return 1
+    finally:
+        if metrics_server is not None:
+            await metrics_server.stop()
+        tracing_handle.shutdown()
     return 0
 
 
@@ -765,6 +793,7 @@ async def _run_daemon(config: ApplicationConfig, state_store: StateStore) -> int
 
     reporter: PrometheusMetricsReporter | None = None
     metrics_server: MetricsServer | None = None
+    tracing_handle = configure_tracing("signage-controller", config.tracing)
     try:
         if config.metrics is not None and config.metrics.enabled:
             reporter = PrometheusMetricsReporter(tv_ids=(tv.id for tv in config.tvs))
@@ -781,6 +810,7 @@ async def _run_daemon(config: ApplicationConfig, state_store: StateStore) -> int
                 factory,
                 stop_event,
                 reporter,
+                tracing_handle.tracer,
             )
     except ControllerAlreadyRunningError as err:
         LOGGER.error("%s", err)
@@ -790,6 +820,7 @@ async def _run_daemon(config: ApplicationConfig, state_store: StateStore) -> int
             reporter.mark_all_unavailable()
         if metrics_server is not None:
             await metrics_server.stop()
+        tracing_handle.shutdown()
     return 0
 
 

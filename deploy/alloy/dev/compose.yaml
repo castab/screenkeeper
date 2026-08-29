@@ -1,9 +1,18 @@
-# Local observability dev stack: Alloy + Prometheus + Grafana only.
+# Local observability dev stack: Alloy + Prometheus + Loki + Tempo + Grafana.
 #
 # The Screenkeeper player is never containerized (see the repository's
 # AGENTS.md) -- run it natively on this machine as usual
 # (`signage-controller run` / `playback run`) with `metrics.enabled: true`
-# in config.yaml. This stack's Alloy reaches it via host.docker.internal.
+# (and `tracing: {enabled: true}` to try traces) in config.yaml. This stack's
+# Alloy reaches it via host.docker.internal.
+#
+# Loki and Tempo here are dev-only stand-ins for a real central backend --
+# same role Prometheus already plays above -- not a statement about the real
+# topology, which Screenkeeper deliberately never sees.
+#
+# The journald bind mount below only has anything to tail on a native Linux
+# dev host: Docker Desktop (Windows/Mac) has no host journald, so the log
+# pipeline starts cleanly there but tails nothing -- expected, not a bug.
 #
 # Usage:
 #   docker compose -f deploy/alloy/dev/compose.yaml up
@@ -21,6 +30,7 @@ services:
       - /etc/alloy/config.alloy
     volumes:
       - ./edge-dev.alloy:/etc/alloy/config.alloy:ro
+      - /var/log/journal:/var/log/journal:ro
     ports:
       - "12345:12345"  # Alloy UI
       - "4317:4317"    # OTLP gRPC
@@ -38,6 +48,22 @@ services:
     ports:
       - "9090:9090"
 
+  loki:
+    image: grafana/loki:latest
+    command:
+      - -config.file=/etc/loki/local-config.yaml
+    ports:
+      - "3100:3100"
+
+  tempo:
+    image: grafana/tempo:latest
+    command:
+      - -config.file=/etc/tempo/tempo.yaml
+    volumes:
+      - ./tempo.yaml:/etc/tempo/tempo.yaml:ro
+    ports:
+      - "3200:3200"  # query API, for Grafana's Tempo datasource
+
   grafana:
     image: grafana/grafana:latest
     environment:
@@ -51,3 +77,5 @@ services:
       - "3000:3000"
     depends_on:
       - prometheus
+      - loki
+      - tempo

@@ -64,6 +64,13 @@ class PlayerStatusReporter(Protocol):
         """Record one mpv restart for a player."""
 
 
+class ControlPlaneStatusReporter(Protocol):
+    """Receive heartbeat-agent outcomes without affecting control flow."""
+
+    def record_heartbeat(self, *, success: bool, auth_rejected: bool = False) -> None:
+        """Record the outcome of one heartbeat attempt."""
+
+
 class PrometheusMetricsReporter:
     """Maintain in-memory Prometheus metrics for TVs and/or playback players.
 
@@ -74,11 +81,16 @@ class PrometheusMetricsReporter:
     """
 
     def __init__(
-        self, *, tv_ids: Iterable[str] = (), player_ids: Iterable[str] = ()
+        self,
+        *,
+        tv_ids: Iterable[str] = (),
+        player_ids: Iterable[str] = (),
+        control_plane: bool = False,
     ) -> None:
         self.registry = CollectorRegistry()
         self._tv_ids = tuple(tv_ids)
         self._player_ids = tuple(player_ids)
+        self._control_plane = control_plane
         self._current_input: dict[str, str] = {}
 
         # A private registry starts empty, unlike prometheus_client's global
@@ -157,6 +169,33 @@ class PrometheusMetricsReporter:
             for player_id in self._player_ids:
                 self._player_up.labels(player_id=player_id).set(0)
 
+        if self._control_plane:
+            self._control_plane_reachable = Gauge(
+                "signage_controller_control_plane_reachable",
+                "Whether the last heartbeat attempt reached the control plane.",
+                registry=self.registry,
+            )
+            self._control_plane_auth_rejected = Gauge(
+                "signage_controller_control_plane_auth_rejected",
+                "Whether the control plane is currently rejecting this device's credential.",
+                registry=self.registry,
+            )
+            self._control_plane_heartbeats = Counter(
+                "signage_controller_control_plane_heartbeats_total",
+                "Heartbeat attempts, by outcome.",
+                ["result"],
+                registry=self.registry,
+            )
+            self._control_plane_last_success = Gauge(
+                "signage_controller_control_plane_last_success_timestamp_seconds",
+                "Unix timestamp of the last successful heartbeat.",
+                registry=self.registry,
+            )
+            self._control_plane_reachable.set(0)
+            self._control_plane_auth_rejected.set(0)
+            self._control_plane_heartbeats.labels(result="success")
+            self._control_plane_heartbeats.labels(result="failure")
+
     def update(
         self,
         tv_id: str,
@@ -213,6 +252,15 @@ class PrometheusMetricsReporter:
     def record_player_restart(self, player_id: str) -> None:
         """Record one mpv restart for a player."""
         self._player_restarts.labels(player_id=player_id).inc()
+
+    def record_heartbeat(self, *, success: bool, auth_rejected: bool = False) -> None:
+        """Record the outcome of one heartbeat attempt."""
+        result = "success" if success else "failure"
+        self._control_plane_heartbeats.labels(result=result).inc()
+        self._control_plane_reachable.set(1 if success else 0)
+        self._control_plane_auth_rejected.set(1 if auth_rejected else 0)
+        if success:
+            self._control_plane_last_success.set(time.time())
 
 
 def build_metrics_app(registry: CollectorRegistry) -> web.Application:

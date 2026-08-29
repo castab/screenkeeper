@@ -14,6 +14,9 @@ import os
 import tempfile
 from pathlib import Path
 
+from opentelemetry import trace
+from opentelemetry.trace import Status, StatusCode
+
 from ..config import PlaybackConfig, PlayerConfig
 from ..observability import PlayerStatusReporter
 from .mpv import MpvPlayer, ProcessLauncher, default_launcher
@@ -60,6 +63,7 @@ class PlayerSupervisor:
         restart_backoff_multipliers: tuple[float, ...] = RESTART_BACKOFF_MULTIPLIERS,
         healthy_reset_seconds: float = HEALTHY_RESET_SECONDS,
         status_reporter: PlayerStatusReporter | None = None,
+        tracer: trace.Tracer | None = None,
     ) -> None:
         self.player = player
         self.playback = playback
@@ -70,6 +74,7 @@ class PlayerSupervisor:
         self._backoff = restart_backoff_multipliers
         self._healthy_reset_seconds = healthy_reset_seconds
         self.status_reporter = status_reporter
+        self.tracer = tracer or trace.get_tracer(__name__)
         self._current_player: MpvPlayer | None = None
 
     def _report_healthy(self, *, healthy: bool) -> None:
@@ -115,7 +120,18 @@ class PlayerSupervisor:
                     launcher=self._launcher,
                 )
                 start_time = asyncio.get_running_loop().time()
-                await mpv_player.start()
+                span_attributes = {"player.id": self.player.id}
+                if self.player.tv_id is not None:
+                    span_attributes["player.tv_id"] = self.player.tv_id
+                with self.tracer.start_as_current_span(
+                    "signage_controller.playback.start", attributes=span_attributes
+                ) as span:
+                    try:
+                        await mpv_player.start()
+                    except Exception as exc:
+                        span.record_exception(exc)
+                        span.set_status(Status(StatusCode.ERROR))
+                        raise
                 self._current_player = mpv_player
                 self.logger.info("%s: playback healthy", self.player.id)
                 self._report_healthy(healthy=True)
@@ -193,6 +209,7 @@ async def run_playback(
     socket_dir: Path | None = None,
     launcher: ProcessLauncher = default_launcher,
     status_reporter: PlayerStatusReporter | None = None,
+    tracer: trace.Tracer | None = None,
 ) -> None:
     """Run an independent supervisor task for every configured player."""
     if not playback.players:
@@ -206,6 +223,7 @@ async def run_playback(
             resolved_socket_dir / f"{player.id}.sock",
             launcher=launcher,
             status_reporter=status_reporter,
+            tracer=tracer,
         )
         for player in playback.players
     ]

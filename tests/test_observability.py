@@ -110,6 +110,58 @@ def test_reporter_without_tv_ids_omits_tv_metrics() -> None:
     assert "signage_controller_tv_connection_up" not in families
 
 
+def test_reporter_without_control_plane_omits_heartbeat_metrics() -> None:
+    reporter = PrometheusMetricsReporter(tv_ids=("left",))
+
+    families = _metric_families(reporter)
+    assert "signage_controller_control_plane_reachable" not in families
+
+
+def test_control_plane_reporter_starts_at_zero() -> None:
+    reporter = PrometheusMetricsReporter(control_plane=True)
+
+    families = _metric_families(reporter)
+    assert families["signage_controller_control_plane_reachable"][0].value == 0
+    assert families["signage_controller_control_plane_auth_rejected"][0].value == 0
+    counts = {s.labels["result"]: s.value for s in families["signage_controller_control_plane_heartbeats"]}
+    assert counts == {"success": 0, "failure": 0}
+    assert "signage_controller_control_plane_last_success_timestamp_seconds" in families
+
+
+def test_control_plane_reporter_records_a_successful_heartbeat() -> None:
+    reporter = PrometheusMetricsReporter(control_plane=True)
+
+    reporter.record_heartbeat(success=True)
+
+    families = _metric_families(reporter)
+    assert families["signage_controller_control_plane_reachable"][0].value == 1
+    assert families["signage_controller_control_plane_auth_rejected"][0].value == 0
+    counts = {s.labels["result"]: s.value for s in families["signage_controller_control_plane_heartbeats"]}
+    assert counts == {"success": 1, "failure": 0}
+    assert families["signage_controller_control_plane_last_success_timestamp_seconds"][0].value > 0
+
+
+def test_control_plane_reporter_records_a_failed_heartbeat() -> None:
+    reporter = PrometheusMetricsReporter(control_plane=True)
+    reporter.record_heartbeat(success=True)
+
+    reporter.record_heartbeat(success=False)
+
+    families = _metric_families(reporter)
+    assert families["signage_controller_control_plane_reachable"][0].value == 0
+    counts = {s.labels["result"]: s.value for s in families["signage_controller_control_plane_heartbeats"]}
+    assert counts == {"success": 1, "failure": 1}
+
+
+def test_control_plane_reporter_records_auth_rejection() -> None:
+    reporter = PrometheusMetricsReporter(control_plane=True)
+
+    reporter.record_heartbeat(success=False, auth_rejected=True)
+
+    families = _metric_families(reporter)
+    assert families["signage_controller_control_plane_auth_rejected"][0].value == 1
+
+
 @pytest.mark.asyncio
 async def test_metrics_endpoint_serves_prometheus_exposition() -> None:
     reporter = PrometheusMetricsReporter(tv_ids=("left",))

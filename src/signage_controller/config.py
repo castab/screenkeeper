@@ -13,6 +13,7 @@ import yaml
 DEFAULT_RECONCILE_INTERVAL = 30.0
 DEFAULT_POWER_ON_DELAY = 15.0
 DEFAULT_METRICS_PORT = 9464
+DEFAULT_OTLP_ENDPOINT = "http://127.0.0.1:4318"
 DEFAULT_RESTART_DELAY = 2.0
 DEFAULT_HWDEC = "auto"
 DEFAULT_MPV_BINARY = "mpv"
@@ -78,6 +79,20 @@ class MetricsConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class TracingConfig:
+    """Optional OpenTelemetry tracing, exported locally to a host-level agent.
+
+    Like metrics, Screenkeeper never sends spans anywhere itself: `endpoint`
+    is always the local Alloy OTLP receiver, never a remote/central URL or
+    credential. Unlike metrics, this is push-based (OTLP has no pull mode),
+    but the push never leaves 127.0.0.1.
+    """
+
+    enabled: bool = True
+    endpoint: str = DEFAULT_OTLP_ENDPOINT
+
+
+@dataclass(frozen=True, slots=True)
 class ControlPlaneConfig:
     """Optional Screenkeeper Control connectivity, used only by the agent.
 
@@ -99,6 +114,7 @@ class ApplicationConfig:
     reconcile_interval: float = DEFAULT_RECONCILE_INTERVAL
     power_on_delay: float = DEFAULT_POWER_ON_DELAY
     metrics: MetricsConfig | None = None
+    tracing: TracingConfig | None = None
     playback: PlaybackConfig | None = None
     control_plane: ControlPlaneConfig | None = None
 
@@ -151,6 +167,7 @@ def load_config(path: Path) -> ApplicationConfig:
         allow_zero=True,
     )
     metrics = _parse_metrics(raw.get("metrics"))
+    tracing = _parse_tracing(raw.get("tracing"))
 
     tvs = tuple(_parse_tv(entry, index) for index, entry in enumerate(tv_entries, start=1))
     ids = [tv.id for tv in tvs]
@@ -168,6 +185,7 @@ def load_config(path: Path) -> ApplicationConfig:
         reconcile_interval=reconcile_interval,
         power_on_delay=power_on_delay,
         metrics=metrics,
+        tracing=tracing,
         playback=playback,
         control_plane=control_plane,
     )
@@ -345,6 +363,27 @@ def _parse_metrics(raw: Any) -> MetricsConfig | None:
         raise ConfigurationError("'metrics.port' must be an integer from 1 to 65535.")
 
     return MetricsConfig(enabled=enabled, host=host.strip(), port=port)
+
+
+def _parse_tracing(raw: Any) -> TracingConfig | None:
+    """Parse the optional OpenTelemetry tracing block.
+
+    Same absence/presence convention as `_parse_metrics`: no `tracing:` key
+    at all means tracing is off; a present block with no explicit `enabled`
+    means the operator wants it on.
+    """
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ConfigurationError("'tracing' must be a mapping.")
+
+    enabled = _parse_bool(raw.get("enabled", True), "tracing.enabled")
+
+    endpoint = raw.get("endpoint", DEFAULT_OTLP_ENDPOINT)
+    if not isinstance(endpoint, str) or not endpoint.strip():
+        raise ConfigurationError("'tracing.endpoint' must be a non-empty string.")
+
+    return TracingConfig(enabled=enabled, endpoint=endpoint.strip())
 
 
 def _parse_control_plane(raw: Any) -> ControlPlaneConfig | None:
