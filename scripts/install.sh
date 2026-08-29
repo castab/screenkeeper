@@ -29,6 +29,7 @@ VERSION=""
 REF=""
 INSTALL_MPV="yes"
 INSTALL_UNITS="yes"
+INSTALL_ALLOY="no"
 FORCE="no"
 
 usage() {
@@ -45,6 +46,10 @@ Usage: install.sh [options]
   --state-dir DIR     Pairing-state directory (default: /var/lib/signage-controller).
   --no-mpv            Do not install mpv (TV control only).
   --no-units          Do not install the systemd user units.
+  --install-alloy     Also install and configure Grafana Alloy, the optional
+                      host telemetry agent (apt-based hosts only). Remote-write
+                      credentials in /etc/alloy/screenkeeper.env still need to
+                      be filled in by hand afterwards -- see deploy/alloy/README.md.
   --force             Rebuild the version directory even if it already exists.
   -h, --help          Show this help.
 USAGE
@@ -65,6 +70,7 @@ while [ $# -gt 0 ]; do
         --state-dir)    STATE_DIR="${2:?--state-dir needs a value}"; shift 2 ;;
         --no-mpv)       INSTALL_MPV="no"; shift ;;
         --no-units)     INSTALL_UNITS="no"; shift ;;
+        --install-alloy) INSTALL_ALLOY="yes"; shift ;;
         --force)        FORCE="yes"; shift ;;
         -h|--help)      usage; exit 0 ;;
         *)              usage >&2; die "unknown option: $1" ;;
@@ -82,11 +88,40 @@ if command -v apt-get >/dev/null 2>&1; then
     export DEBIAN_FRONTEND=noninteractive
     packages="python3 python3-venv ca-certificates curl tar"
     [ "$INSTALL_MPV" = "yes" ] && packages="$packages mpv"
+    [ "$INSTALL_ALLOY" = "yes" ] && packages="$packages gnupg jq"
     apt-get update -qq
     # shellcheck disable=SC2086
     apt-get install -y --no-install-recommends $packages
 else
     warn "no apt-get found; ensure python3 (3.11+), python3-venv, curl, tar$([ "$INSTALL_MPV" = yes ] && echo ', mpv') are installed"
+    [ "$INSTALL_ALLOY" = "yes" ] && warn "--install-alloy needs apt-get; install Grafana Alloy manually, see deploy/alloy/README.md"
+fi
+
+# --- Grafana Alloy (optional host telemetry agent) --------------------------
+# Alloy is host infrastructure, not part of Screenkeeper: it is never a
+# startup dependency in either direction (see docs/architecture/observability.md).
+# This block only installs the package and the ready-to-use config; the
+# remote-write credentials in /etc/alloy/screenkeeper.env are always left for
+# an operator to fill in by hand -- they must never be scripted or committed.
+if [ "$INSTALL_ALLOY" = "yes" ]; then
+    if command -v apt-get >/dev/null 2>&1; then
+        if [ ! -e /etc/apt/keyrings/grafana.gpg ]; then
+            log "Adding the Grafana apt repository"
+            install -d -m 0755 /etc/apt/keyrings
+            curl -fsSL https://apt.grafana.com/gpg.key | gpg --dearmor -o /etc/apt/keyrings/grafana.gpg
+            echo "deb [signed-by=/etc/apt/keyrings/grafana.gpg] https://apt.grafana.com stable main" \
+                > /etc/apt/sources.list.d/grafana.list
+        fi
+        log "Installing Grafana Alloy"
+        apt-get update -qq
+        if ! apt-get install -y --no-install-recommends alloy; then
+            warn "could not install the alloy package; install it manually, see deploy/alloy/README.md"
+            INSTALL_ALLOY="no"
+        fi
+    else
+        warn "--install-alloy needs apt-get; skipping. Install Alloy manually, see deploy/alloy/README.md"
+        INSTALL_ALLOY="no"
+    fi
 fi
 
 command -v python3 >/dev/null 2>&1 || die "python3 is required"
@@ -235,6 +270,54 @@ if [ "$INSTALL_UNITS" = "yes" ] && [ -d "$SOURCE_DIR/packaging" ]; then
     fi
 fi
 
+# --- Grafana Alloy config (only after the alloy package installed above) ----
+if [ "$INSTALL_ALLOY" = "yes" ]; then
+    if [ ! -e /etc/alloy/config.alloy ]; then
+        log "Installing Alloy config from deploy/alloy/edge.alloy"
+        install -o root -g root -m 0644 \
+            "$SOURCE_DIR/deploy/alloy/edge.alloy" /etc/alloy/config.alloy
+    else
+        log "/etc/alloy/config.alloy already exists; leaving it unchanged"
+    fi
+
+    log "Installing the player/location identity bridge"
+    install -o root -g root -m 0755 \
+        "$SOURCE_DIR/deploy/alloy/render-identity-env.sh" \
+        /usr/local/bin/screenkeeper-render-identity-env
+
+    install -d -m 0755 /etc/systemd/system/alloy.service.d
+    if [ ! -e /etc/systemd/system/alloy.service.d/screenkeeper.conf ]; then
+        cat > /etc/systemd/system/alloy.service.d/screenkeeper.conf <<'UNIT'
+[Service]
+ExecStartPre=-/usr/local/bin/screenkeeper-render-identity-env
+EnvironmentFile=-/etc/alloy/screenkeeper-identity.env
+EnvironmentFile=/etc/alloy/screenkeeper.env
+UNIT
+    fi
+
+    if [ ! -e /etc/alloy/screenkeeper.env ]; then
+        log "Seeding /etc/alloy/screenkeeper.env (fill in real values before Alloy can export anything)"
+        ( umask 077
+          cat > /etc/alloy/screenkeeper.env <<'ENVFILE'
+# Alloy's own environment. Screenkeeper never reads this file or its values.
+# Fill in real values before Alloy can remote_write telemetry anywhere -- these
+# placeholders let Alloy start and scrape locally while exporting nothing.
+METRICS_REMOTE_WRITE_URL=
+METRICS_REMOTE_WRITE_USERNAME=
+METRICS_REMOTE_WRITE_PASSWORD=
+SCREENKEEPER_ENVIRONMENT=production
+ENVFILE
+        )
+        chown root:root /etc/alloy/screenkeeper.env
+        chmod 0600 /etc/alloy/screenkeeper.env
+    fi
+
+    if ! systemctl daemon-reload || ! systemctl enable --now alloy >/dev/null 2>&1; then
+        warn "could not enable/start alloy; check it manually (systemctl status alloy)"
+        warn "see deploy/alloy/README.md for the manual setup steps"
+    fi
+fi
+
 cat <<EOF
 
 Screenkeeper $RESOLVED_VERSION is installed.
@@ -259,3 +342,17 @@ Later updates need no root:
   signage-controller upgrade
   signage-controller rollback
 EOF
+
+if [ "$INSTALL_ALLOY" = "yes" ]; then
+    cat <<'EOF'
+
+Grafana Alloy (host telemetry agent) is installed and enabled, but it will not
+export anything yet:
+  1. Fill in /etc/alloy/screenkeeper.env with the real remote-write URL and
+     credentials (0600, root-owned, never committed anywhere).
+  2. sudo systemctl restart alloy
+See deploy/alloy/README.md for the full setup, and
+docs/architecture/observability.md for the architecture. Screenkeeper's own
+units never depend on Alloy and keep running with or without it.
+EOF
+fi

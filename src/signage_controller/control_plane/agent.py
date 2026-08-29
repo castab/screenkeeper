@@ -23,6 +23,7 @@ import random
 
 from ..config import ApplicationConfig, ControlPlaneConfig
 from ..inventory.drm import DEFAULT_SYSFS_DRM, collect_inventory
+from ..observability import ControlPlaneStatusReporter
 from .client import (
     ControlPlaneAuthError,
     ControlPlaneClient,
@@ -74,6 +75,7 @@ class HeartbeatAgent:
         auth_backoff_seconds: float = AUTH_FAILURE_BACKOFF_SECONDS,
         jitter_fraction: float = JITTER_FRACTION,
         rng: random.Random | None = None,
+        status_reporter: ControlPlaneStatusReporter | None = None,
     ) -> None:
         self.config = config
         self.control_plane = control_plane
@@ -82,6 +84,7 @@ class HeartbeatAgent:
         self.identity = identity
         self.logger = logger or LOGGER
         self._sysfs_root = sysfs_root
+        self._status_reporter = status_reporter
         self._backoff_delays = backoff_delays
         self._auth_backoff_seconds = auth_backoff_seconds
         self._jitter_fraction = jitter_fraction
@@ -121,6 +124,7 @@ class HeartbeatAgent:
         except ControlPlaneError as err:
             # A 4xx that will not fix itself. Back off hard rather than hammering.
             self._reachable = False
+            self._record_heartbeat(success=False)
             self.logger.error("Control plane rejected this heartbeat: %s", err)
             self._failure_streak += 1
             return self._jittered(_backoff_delay(self._failure_streak, self._backoff_delays))
@@ -128,6 +132,7 @@ class HeartbeatAgent:
             raise
         except Exception:
             # An unexpected bug here must not take the agent process down.
+            self._record_heartbeat(success=False)
             self.logger.exception("Unexpected control-plane agent failure")
             self._failure_streak += 1
             return self._jittered(_backoff_delay(self._failure_streak, self._backoff_delays))
@@ -147,6 +152,7 @@ class HeartbeatAgent:
         self._auth_rejected = False
         self._failure_streak = 0
         self._remember_heartbeat()
+        self._record_heartbeat(success=True)
         return self.control_plane.heartbeat_interval
 
     def _on_unavailable(self, err: ControlPlaneUnavailableError) -> float:
@@ -156,6 +162,7 @@ class HeartbeatAgent:
             self.logger.debug("Control plane still unavailable: %s", err)
         self._reachable = False
         self._failure_streak += 1
+        self._record_heartbeat(success=False)
         return self._jittered(_backoff_delay(self._failure_streak, self._backoff_delays))
 
     def _on_auth_failure(self, err: ControlPlaneAuthError) -> float:
@@ -173,7 +180,12 @@ class HeartbeatAgent:
         self._reachable = False
         self._auth_rejected = True
         self._failure_streak += 1
+        self._record_heartbeat(success=False, auth_rejected=True)
         return self._jittered(self._auth_backoff_seconds)
+
+    def _record_heartbeat(self, *, success: bool, auth_rejected: bool = False) -> None:
+        if self._status_reporter is not None:
+            self._status_reporter.record_heartbeat(success=success, auth_rejected=auth_rejected)
 
     def _remember_heartbeat(self) -> None:
         try:
@@ -199,9 +211,12 @@ async def run_agent(
     stop_event: asyncio.Event,
     *,
     client: ControlPlaneClient | None = None,
+    status_reporter: ControlPlaneStatusReporter | None = None,
 ) -> None:
     """Run one heartbeat agent for this appliance."""
     resolved = client or ControlPlaneClient(
         control_plane.base_url, timeout=control_plane.request_timeout
     )
-    await HeartbeatAgent(config, control_plane, resolved, store, identity).run(stop_event)
+    await HeartbeatAgent(
+        config, control_plane, resolved, store, identity, status_reporter=status_reporter
+    ).run(stop_event)

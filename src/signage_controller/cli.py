@@ -624,14 +624,29 @@ async def _agent_run(config: ApplicationConfig, state_store: StateStore) -> int:
         with contextlib.suppress(NotImplementedError):
             loop.add_signal_handler(signum, stop_event.set)
 
+    reporter: PrometheusMetricsReporter | None = None
+    metrics_server: MetricsServer | None = None
     try:
+        if config.metrics is not None and config.metrics.enabled:
+            reporter = PrometheusMetricsReporter(control_plane=True)
+            # `run` binds metrics.port, `playback run` binds +1; +2 keeps the
+            # config surface to a single 'metrics' block instead of a port per command.
+            metrics_server = MetricsServer(
+                reporter.registry, config.metrics.host, config.metrics.port + 2
+            )
+            await metrics_server.start()
         with acquire_controller_lock(
             state_store.state_dir, name="agent.lock", command="agent run"
         ):
-            await run_agent(config, control_plane, device_store, identity, stop_event)
+            await run_agent(
+                config, control_plane, device_store, identity, stop_event, status_reporter=reporter
+            )
     except ControllerAlreadyRunningError as err:
         LOGGER.error("%s", err)
         return 1
+    finally:
+        if metrics_server is not None:
+            await metrics_server.stop()
     return 0
 
 

@@ -26,6 +26,16 @@ from signage_controller.http_client import URLError
 from .conftest import FakeTransport
 
 
+class StubStatusReporter:
+    """Records `record_heartbeat` calls without touching any real metric."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[bool, bool]] = []
+
+    def record_heartbeat(self, *, success: bool, auth_rejected: bool = False) -> None:
+        self.calls.append((success, auth_rejected))
+
+
 BASE_URL = "https://screenkeeper.example.com"
 ACCEPTED = (202, {})
 CONFIG = ApplicationConfig(
@@ -267,6 +277,42 @@ async def test_an_unexpected_error_is_contained(tmp_path: Path) -> None:
     await _run_until(agent, transport, 1)
 
     assert len(calls) >= 2
+
+
+async def test_a_successful_heartbeat_reports_success_to_the_status_reporter(
+    tmp_path: Path,
+) -> None:
+    transport = FakeTransport([ACCEPTED])
+    stub = StubStatusReporter()
+    agent, _ = _agent(tmp_path, transport, status_reporter=stub)
+
+    await _run_until(agent, transport, 1)
+
+    assert stub.calls == [(True, False)]
+
+
+async def test_a_transient_failure_reports_failure_to_the_status_reporter(
+    tmp_path: Path,
+) -> None:
+    transport = FakeTransport([URLError("network down"), ACCEPTED])
+    stub = StubStatusReporter()
+    agent, _ = _agent(tmp_path, transport, status_reporter=stub)
+
+    await _run_until(agent, transport, 2)
+
+    assert stub.calls == [(False, False), (True, False)]
+
+
+async def test_an_auth_failure_reports_auth_rejected_to_the_status_reporter(
+    tmp_path: Path,
+) -> None:
+    transport = FakeTransport([(401, {"error": "unknown_device"})] * 2)
+    stub = StubStatusReporter()
+    agent, _ = _agent(tmp_path, transport, auth_backoff_seconds=0.01, status_reporter=stub)
+
+    await _run_until(agent, transport, 2)
+
+    assert stub.calls == [(False, True), (False, True)]
 
 
 def test_backoff_progresses_then_caps() -> None:

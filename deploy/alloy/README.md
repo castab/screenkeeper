@@ -29,6 +29,20 @@ These normally run on **different hosts** in production (a player is edge
 infrastructure; the control server is central infrastructure), which is why
 there are two separate files rather than one parameterized one.
 
+## Automated setup (edge hosts, apt-based distros)
+
+`scripts/install.sh --install-alloy` automates steps 1-4 below on an edge
+player host: it adds Grafana's apt repository, installs the `alloy` package,
+places `edge.alloy` at `/etc/alloy/config.alloy` (only if that path doesn't
+already exist, so a rerun never clobbers operator edits), installs
+`render-identity-env.sh`, and drops the systemd override shown in step 3. It
+always leaves `/etc/alloy/screenkeeper.env` as an unfilled template --
+remote-write credentials are never scripted or committed, so filling that
+file in and restarting `alloy` is still a manual, final step. This only
+covers edge hosts; a control-plane host doesn't use `scripts/install.sh` (see
+`control/README.md`) and still follows the manual steps below, as does any
+non-apt distro.
+
 ## 1. Install Alloy
 
 Use Grafana's own official package for your distribution -- this repository

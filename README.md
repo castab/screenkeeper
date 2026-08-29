@@ -75,6 +75,7 @@ Review the script before running it as root. Useful options:
 | `--user NAME` | Service account to own and run the install (default `signage`). |
 | `--no-mpv` | Skip mpv; TV control only. |
 | `--no-units` | Skip the systemd user units. |
+| `--install-alloy` | Also install and configure Grafana Alloy, the optional host telemetry agent (apt-based hosts only). See "Observability". |
 | `--force` | Rebuild the version directory even if it already exists. |
 
 The installer is idempotent, so re-running it is safe. Once a release tag
@@ -652,16 +653,19 @@ control releases never need to match versions.
 
 ## Observability
 
-Screenkeeper produces telemetry locally; it never transports it anywhere. Both
-`signage-controller run` and `signage-controller playback run` can expose a
+Screenkeeper produces telemetry locally; it never transports it anywhere.
+`signage-controller run`, `playback run`, and `agent run` can each expose a
 local Prometheus `/metrics` endpoint, bound to `127.0.0.1` by default, for a
 host-level agent such as [Grafana Alloy](https://grafana.com/docs/alloy/) to
 scrape and forward. Screenkeeper holds no remote URL and no telemetry
 credential of any kind — see `docs/architecture/observability.md` for the full
 architecture, the host-agent setup, and the "Screenkeeper knows X, does not
-know Y" boundary. Commissioning commands (`pair`, `status`, `inputs`, `apply`)
-publish nothing; only the two long-running commands do, and only when
-`metrics.enabled` is true.
+know Y" boundary. `scripts/install.sh --install-alloy` automates installing
+and configuring Alloy on an edge host (see `deploy/alloy/README.md`); remote-
+write credentials are always left for an operator to fill in by hand.
+Commissioning commands (`pair`, `status`, `inputs`, `apply`) publish nothing;
+only the three long-running commands do, and only when `metrics.enabled` is
+true.
 
 Set `metrics:` in `config.yaml`:
 
@@ -673,11 +677,13 @@ metrics:
 ```
 
 `run` binds `metrics.port` (default `9464`); `playback run` binds
-`metrics.port + 1` (default `9465`), since both commands read the same config
-file and commonly run on the same host. Omitting `metrics:` entirely, or
-setting `enabled: false`, disables the endpoint — the controller and playback
-supervisor behave identically either way; nothing about TV control or mpv
-playback depends on metrics being enabled, reachable, or scraped.
+`metrics.port + 1` (default `9465`); `agent run` binds `metrics.port + 2`
+(default `9466`) — since all three commands read the same config file and
+commonly run on the same host. Omitting `metrics:` entirely, or setting
+`enabled: false`, disables the endpoint — the controller, playback
+supervisor, and heartbeat agent behave identically either way; nothing about
+TV control, mpv playback, or control-plane reporting depends on metrics
+being enabled, reachable, or scraped.
 
 `run` publishes these metrics, each labeled by `tv_id` unless noted:
 
@@ -705,7 +711,19 @@ playback depends on metrics being enabled, reachable, or scraped.
 - `signage_controller_player_status_updated_timestamp_seconds`: when a
   player's status was last observed.
 
-Both processes also expose the standard `prometheus_client` process
+`agent run` publishes, unlabeled (there is one heartbeat agent per player):
+
+- `signage_controller_control_plane_reachable`: `1` if the last heartbeat
+  attempt reached the control plane, `0` otherwise.
+- `signage_controller_control_plane_auth_rejected`: `1` if the control plane
+  is currently rejecting this device's credential — re-enroll with
+  `signage-controller device enroll` when this is set.
+- `signage_controller_control_plane_heartbeats_total{result}`: heartbeat
+  attempts, `result` is `success` or `failure`.
+- `signage_controller_control_plane_last_success_timestamp_seconds`: when a
+  heartbeat last succeeded.
+
+All three processes also expose the standard `prometheus_client` process
 collectors (`process_start_time_seconds`, `process_resident_memory_bytes`,
 etc.) with no extra code, which is enough to answer "when did this process
 last start" without a dedicated uptime metric.

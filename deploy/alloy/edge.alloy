@@ -24,6 +24,8 @@ discovery.relabel "screenkeeper" {
 		{"__address__" = "127.0.0.1:9464", "job" = "signage_controller"},
 		// `signage-controller playback run` binds metrics.port + 1.
 		{"__address__" = "127.0.0.1:9465", "job" = "signage_controller_playback"},
+		// `signage-controller agent run` binds metrics.port + 2.
+		{"__address__" = "127.0.0.1:9466", "job" = "signage_controller_agent"},
 	]
 
 	rule {

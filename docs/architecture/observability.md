@@ -85,6 +85,7 @@ separate OS processes, so they cannot share one in-process registry):
 |---|---|
 | `signage-controller run` | `http://127.0.0.1:9464/metrics` |
 | `signage-controller playback run` | `http://127.0.0.1:<metrics.port + 1>/metrics` (`9465` by default) |
+| `signage-controller agent run` | `http://127.0.0.1:<metrics.port + 2>/metrics` (`9466` by default) |
 
 Metrics published (all local-only; no `job`/`instance` label is set by the
 app -- Alloy's scrape config supplies those):
@@ -99,6 +100,13 @@ app -- Alloy's scrape config supplies those):
 - `signage_controller_player_up{player_id}`
 - `signage_controller_player_restarts_total{player_id}`
 - `signage_controller_player_status_updated_timestamp_seconds{player_id}`
+- `signage_controller_control_plane_reachable`: whether the last heartbeat
+  attempt reached the control plane (published by `agent run` only).
+- `signage_controller_control_plane_auth_rejected`: whether the control plane
+  is currently rejecting this device's credential -- distinct from ordinary
+  unreachability, since it means an operator must re-enroll.
+- `signage_controller_control_plane_heartbeats_total{result}`
+- `signage_controller_control_plane_last_success_timestamp_seconds`
 
 Plus `prometheus_client`'s default process collectors
 (`process_start_time_seconds`, `process_resident_memory_bytes`, etc.) with
@@ -222,6 +230,11 @@ needs to be able to tell them apart:
 collectors) answers "did this process restart recently," independent of
 `signage_controller_player_restarts_total`/`tv_connection_up`, which answer
 "is the thing this process manages actually healthy."
+`signage_controller_control_plane_reachable` and
+`_last_success_timestamp_seconds` (from `agent run`) answer a related but
+different question -- "is this player still phoning home to the control
+plane" -- which can go stale even while TV control and playback are fully
+healthy, since the three processes are architecturally independent.
 
 No alerting platform is implemented as part of this work -- the metrics
 above are what a central Prometheus-compatible alerting layer would query.
@@ -275,7 +288,7 @@ open http://127.0.0.1:3000
 
 | Check | How |
 |---|---|
-| Screenkeeper `/metrics` works | `curl http://127.0.0.1:9464/metrics` on the host (or `:9465` for playback); confirm `metrics.enabled: true` in `config.yaml` if it refuses the connection |
+| Screenkeeper `/metrics` works | `curl http://127.0.0.1:9464/metrics` on the host (`:9465` for playback, `:9466` for the agent); confirm `metrics.enabled: true` in `config.yaml` if it refuses the connection |
 | Alloy can scrape Screenkeeper | `curl -s http://127.0.0.1:12345/api/v0/web/components \| jq '.[] \| select(.localID=="prometheus.scrape.screenkeeper")'` -- `health.state` should be `healthy` |
 | OTLP receiver is listening | `curl -v http://127.0.0.1:4318/v1/metrics` should get a response (even a 4xx from an empty POST proves the port is open); or check `journalctl -u alloy \| grep otelcol.receiver.otlp` |
 | Host metrics are being collected | `curl -s http://127.0.0.1:12345/api/v0/web/components \| jq '.[] \| select(.localID=="prometheus.exporter.unix.host")'` |
@@ -291,13 +304,15 @@ push, its protobuf encoding, and the Loki push handler; new playback and
 TV-command metrics; `deploy/alloy/*.alloy` (scrape, curated host metrics,
 inert-but-ready OTLP receiver, remote_write); the identity-bridge script;
 a light-touch Grafana dashboard update; this document; local dev compose
-stack.
+stack; `signage-controller agent run` heartbeat metrics
+(`signage_controller_control_plane_*`); `scripts/install.sh --install-alloy`,
+which installs and configures Alloy on apt-based edge hosts (credential
+population in `/etc/alloy/screenkeeper.env` stays manual by design -- see
+`deploy/alloy/README.md`).
 
 **Deferred:** OTEL tracing spans in either component; OTEL auto-
 instrumentation wiring for `control/`; an actual Alloy→Loki log pipeline
 (journald tailing is documented, not implemented/tested here); content-sync
-metrics (no such subsystem exists yet); `scripts/install.sh` automation for
-installing Alloy itself; domain-level control-plane counters beyond the one
-HTTP request timer; `signage-controller agent run` heartbeat metrics; an
-expanded/redesigned Grafana dashboard beyond the two panels added here; any
-alerting platform.
+metrics (no such subsystem exists yet); domain-level control-plane counters
+beyond the one HTTP request timer; an expanded/redesigned Grafana dashboard
+beyond the two panels added here; any alerting platform.
