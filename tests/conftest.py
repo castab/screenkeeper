@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import Any
 
 from signage_controller.tv.base import (
     StateListener,
@@ -160,3 +164,116 @@ class FakeProcessLauncher:
             process = FakeMpvProcess(pid=1000 + len(self.processes))
         self.processes.append(process)
         return process
+
+
+class FakeTransport:
+    """Scripted stand-in for `http_client.request_json`, recording every call.
+
+    Implements the `Transport` protocol the control-plane client accepts, so
+    most tests exercise the real client without a socket. Outcomes are consumed
+    in order; an `Exception` outcome is raised to simulate a transport failure.
+    """
+
+    def __init__(self, outcomes: list[tuple[int, dict[str, Any]] | Exception] | None = None) -> None:
+        self.requests: list[dict[str, Any]] = []
+        self._outcomes = list(outcomes) if outcomes else []
+
+    def __call__(
+        self,
+        url: str,
+        *,
+        method: str = "GET",
+        payload: dict[str, Any] | None = None,
+        token: str | None = None,
+        timeout: float = 10.0,
+    ) -> tuple[int, dict[str, Any]]:
+        self.requests.append(
+            {
+                "url": url,
+                "method": method,
+                "payload": payload,
+                "token": token,
+                "timeout": timeout,
+            }
+        )
+        if not self._outcomes:
+            return 200, {}
+        outcome = self._outcomes.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    @property
+    def call_count(self) -> int:
+        return len(self.requests)
+
+
+class FakeControlPlaneServer:
+    """A real HTTP server on loopback, for end-to-end contract coverage.
+
+    The rest of the suite injects `FakeTransport`; this exists so at least one
+    test proves the actual urllib request path — headers, JSON encoding, status
+    handling — works against a socket, the same way the mpv IPC tests run a real
+    Unix server rather than only faking the protocol.
+
+    Routes are `(method, path) -> (status, body)`. Every request is recorded
+    with its headers so a test can assert on the Authorization header.
+    """
+
+    def __init__(self, routes: dict[tuple[str, str], tuple[int, Any]] | None = None) -> None:
+        self.routes = dict(routes or {})
+        self.requests: list[dict[str, Any]] = []
+        self._server: ThreadingHTTPServer | None = None
+        self._thread: threading.Thread | None = None
+
+    @property
+    def base_url(self) -> str:
+        assert self._server is not None, "server is not running"
+        host, port = self._server.server_address[:2]
+        return f"http://{host}:{port}"
+
+    def __enter__(self) -> FakeControlPlaneServer:
+        outer = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
+                self._respond("GET")
+
+            def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
+                self._respond("POST")
+
+            def _respond(self, method: str) -> None:
+                length = int(self.headers.get("Content-Length") or 0)
+                raw = self.rfile.read(length) if length else b""
+                outer.requests.append(
+                    {
+                        "method": method,
+                        "path": self.path,
+                        "headers": dict(self.headers),
+                        "body": json.loads(raw) if raw else None,
+                    }
+                )
+                status, body = outer.routes.get((method, self.path), (404, {"error": "not_found"}))
+                encoded = json.dumps(body).encode() if body is not None else b""
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(encoded)))
+                self.end_headers()
+                if encoded:
+                    self.wfile.write(encoded)
+
+            def log_message(self, *args: object) -> None:
+                """Silence the default stderr access log."""
+
+        # Port 0: let the OS pick, so concurrent test runs cannot collide.
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        assert self._server is not None
+        self._server.shutdown()
+        self._server.server_close()
+        if self._thread is not None:
+            self._thread.join(timeout=5)

@@ -1,6 +1,6 @@
 # Signage Controller
 
-Screenkeeper manages two independent desired states for digital signage from
+Screenkeeper Edge manages three independent concerns for digital signage from
 one YAML configuration file:
 
 1. **LG webOS television state over the LAN** (Phase 1): connects directly to
@@ -10,14 +10,23 @@ one YAML configuration file:
 2. **Local signage playback through mpv** (Phase 2): keeps a configured local
    video looping fullscreen on the host's display, independent of whether the
    paired TV is reachable.
+3. **Device identity, inventory, and reporting** (Phase 3, optional): gives the
+   appliance a permanent identity, lets an administrator claim it with a short
+   pairing code, and reports the displays and configured relationships it
+   observes to a control plane. See "Control Plane" below.
 
-These two subsystems are intentionally decoupled. A TV being powered off does
-not stop its player from looping; a player being unavailable does not stop TV
-convergence. When staff turns a TV back on, Screenkeeper switches it to the
-correct HDMI input and the video is already there.
+These subsystems are intentionally decoupled. A TV being powered off does not
+stop its player from looping; a player being unavailable does not stop TV
+convergence; a control plane being unreachable stops neither. When staff turns
+a TV back on, Screenkeeper switches it to the correct HDMI input and the video
+is already there.
 
 The configuration supports multiple TVs and multiple players, but start by
 commissioning one TV and one player completely before adding more.
+
+**Signage keeps running without the Internet.** TV control is local to the LAN,
+mpv plays local files, and the control plane is optional. A WAN outage stops
+reporting and nothing else.
 
 ## Requirements
 
@@ -42,7 +51,7 @@ There are two ways to install, for two different jobs.
 ### Appliance Install
 
 On the signage host, use the installer. It creates a versioned, self-updating
-deployment and two systemd user units:
+deployment and the systemd user units:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/castab/screenkeeper/main/scripts/install.sh \
@@ -78,13 +87,15 @@ What it creates:
 /opt/screenkeeper/current -> versions/<ver>  atomically swapped symlink
 /usr/local/bin/signage-controller            -> current/venv/bin/signage-controller
 /etc/screenkeeper/config.yaml                survives upgrades
-/var/lib/signage-controller/                 pairing state, survives upgrades
+/var/lib/signage-controller/                 pairing keys and device identity,
+                                             survives upgrades
 ```
 
-Both runtime processes are systemd **user** units owned by a dedicated,
+Every runtime process is a systemd **user** unit owned by a dedicated,
 lingering account. mpv needs that user's graphical session, and running the TV
 controller as the same user is what lets `signage-controller upgrade` work
-without root.
+without root. The installer templates the units into place but enables nothing;
+see "Deployment Shape" for which ones to enable and when.
 
 ### Development Install
 
@@ -259,6 +270,10 @@ is the periodic correctness fallback after the initial reconciliation.
 
 `power_on_delay` is a non-negative number of seconds. It defaults to `15` and
 is used after each successful connection and an observed off-to-on state change.
+
+The optional `playback:`, `observability:`, and `control_plane:` sections are
+documented in their own sections below. Omitting any of them preserves the
+behavior described above exactly.
 
 ## mpv Playback
 
@@ -435,10 +450,213 @@ playback:
 ```
 
 Connector names above are illustrative only; real names are discovered on
-the target hardware, not assumed in advance. Physical display topology
-management, EDID handling, Xorg provisioning, autologin, and production
-multi-monitor mode-setting are deferred to that later deployment phase — see
-"Real-Hardware Validation" below.
+the target hardware, not assumed in advance. `signage-controller device
+inventory` reports the connector names this host actually has. Physical display
+topology management, EDID *forcing*, Xorg provisioning, autologin, and
+production multi-monitor mode-setting are deferred to that later deployment
+phase — see "Real-Hardware Validation" below.
+
+## Control Plane
+
+Optional. Everything above works without it, and nothing below can interfere
+with TV control or mpv playback.
+
+The control plane exists to answer questions you cannot answer by walking up to
+a box: which appliance is this, where is it installed, and what displays are
+actually plugged into it? It distinguishes three things:
+
+```text
+IDENTITY        Who am I?                              implemented
+OBSERVED STATE  What hardware do I currently see?      implemented
+DESIRED STATE   What does the control plane want?      a later phase
+```
+
+Only the first two exist today. The appliance reports; it is not yet told what
+to do.
+
+### What it does not change
+
+- **LG TV control stays local.** The appliance talks to each TV over the LAN,
+  exactly as before. The control plane is never in that path.
+- **mpv stays local.** Players loop local files with no network dependency.
+- **Signage survives a WAN failure.** A control-plane outage stops heartbeats
+  and nothing else. TVs keep converging, video keeps looping.
+- **The player initiates everything.** There is no inbound connection, no
+  listening port, no callback, and no remote shell. A Screenkeeper host needs
+  no inbound Internet access at all.
+- **Location is assigned, never inferred.** The appliance does not look at
+  public IP, GPS, Wi-Fi SSID, hostname, timezone, or network topology to guess
+  where it is. An administrator assigns it to an organization and location when
+  they claim it.
+
+### Configuration
+
+```yaml
+control_plane:
+  base_url: https://screenkeeper.example.com
+  heartbeat_interval: 30
+  request_timeout: 10
+```
+
+`base_url` is the server root; the appliance appends `/api/v1` itself. Omitting
+the whole section preserves current behavior exactly.
+
+HTTPS is required, because every request after enrollment carries a bearer
+token. Plain HTTP is accepted in exactly two cases, and never silently: a
+loopback host (`localhost`, `127.0.0.1`, `::1`), or an explicit
+`allow_insecure_http: true` for development against a local server. Any other
+`http://` URL is a configuration error.
+
+`heartbeat_interval` and `request_timeout` are positive numbers of seconds,
+defaulting to `30` and `10`.
+
+### Identity
+
+On first use the appliance generates its own identity and stores it in the
+state directory beside the TV pairing keys:
+
+```text
+$STATE_DIR/device.json     0600, inside a 0700 directory
+```
+
+| Field | Meaning |
+| --- | --- |
+| `installation_id` | A UUIDv4. Public identity, safe to display and log. |
+| `device_token` | 256 bits of cryptographic randomness. **A credential.** |
+
+The token is sent once, in the enrollment request body, and is a bearer token
+thereafter. The server stores only a hash of it and never sends it back — so
+the control plane never has to issue a permanent secret to the player. It is
+never printed, never logged, and never appears in `device status`.
+
+Identity is permanent. It survives restarts, upgrades, and rollbacks, because
+the state directory lives outside the versioned install tree. A host that keeps
+its state directory keeps its identity. A wiped state directory is a new
+installation and gets a new one.
+
+### Enrollment
+
+```bash
+signage-controller device enroll
+```
+
+```text
+Screenkeeper enrollment
+
+Pairing code:
+
+    Q7KM-4HF2
+
+Waiting for this player to be claimed...
+```
+
+An administrator enters that code in the control plane and assigns the player
+to a location. The command then prints what was assigned and exits:
+
+```text
+Player claimed.
+
+Player:       Main Menu Wall
+Organization: Example Restaurant
+Location:     Downtown
+```
+
+The assignment is stored locally, so `device status` can report it offline.
+
+Enrollment needs neither the TV controller nor mpv running. If the code expires
+before anyone claims it, the appliance requests a new one **with the same
+identity** and shows the new code — it never generates a new device token to
+recover, because that would abandon an enrollment an administrator may be about
+to claim. Enrollment is always operator-initiated; no daemon requests one.
+
+### Inventory
+
+```bash
+signage-controller device inventory
+signage-controller device inventory --json
+```
+
+Reads `/sys/class/drm` directly rather than shelling out to `xrandr` or
+`drm_info`, so it works over SSH, headless, and before any graphical session
+exists. It needs no X11, no Wayland, no mpv, no television, and no Internet,
+and it contacts nothing.
+
+```text
+GPUs:
+  card0  vendor=0x8086  device=0x5912  driver=i915
+Connectors:
+  DP-1: connected, enabled
+    modes: 1920x1080, 1280x720
+    edid: 9f2c1a4e8b6d3f57…  GSM  LG TV  serial=205NTKM1G347
+  HDMI-A-1: disconnected, disabled
+```
+
+For each connector it reports the name, status, whether it is enabled, its
+modes, and an EDID summary. Every EDID field except the SHA-256 hash is
+optional and is omitted rather than guessed. The hash is the useful part even
+on its own: a changed hash means somebody swapped the physical display.
+
+Collection is best-effort and degrades gracefully. Partial data on VMs, WSL,
+headless servers, and unusual drivers is expected, and **no DRM devices at all
+is a valid result**, not an error.
+
+### What a heartbeat reports
+
+Two things, deliberately kept apart:
+
+```text
+OBSERVED     DP-1 is connected and its EDID hashes to abc123
+CONFIGURED   dev-menu is configured for DP-1 and dev-tv
+```
+
+The first comes from the kernel. The second comes from the `tvs:` and
+`playback.players:` sections you already wrote. Reporting them separately lets
+the control plane notice later that they disagree — a display swapped, or a
+player bound to a connector that no longer exists.
+
+The configured half is assembled from an allowlist, so it never carries LG
+client keys, the device token, observability credentials, or local media paths.
+What a player *plays* is not reported.
+
+A heartbeat is a snapshot of the present, not an event log.
+
+### Running the agent
+
+```bash
+signage-controller agent run
+```
+
+Long-running and outbound-only. It requires an existing enrollment, collects
+inventory, sends heartbeats on the configured interval, and retries safely when
+the control plane is unavailable — 5s, 10s, 20s, 30s, then 60s, with jitter so
+a fleet that lost the WAN together does not reconnect in lockstep.
+
+It logs transitions, not retries:
+
+```text
+control plane reachable
+control plane unavailable
+heartbeat restored
+authentication rejected
+```
+
+A rejected credential (`401`/`403`) is treated differently from a network
+failure: the agent logs an actionable error and backs off heavily rather than
+hammering the server, and it never quietly creates a new identity to "fix"
+itself.
+
+The agent holds its own `agent.lock`, separate from `controller.lock` and
+`playback.lock`, so it runs alongside the other two runtimes without
+interfering with either.
+
+### The shared contract
+
+`contracts/openapi.yaml` at the repository root is the source of truth for
+communication between Screenkeeper Edge and Screenkeeper Control. Both
+implement it; neither imports the other's code, which is what lets the two ship
+independently even though they live in one repository. Within `/api/v1`,
+clients tolerate unknown response fields and evolution is additive — edge and
+control releases never need to match versions.
 
 ## Observability
 
@@ -618,43 +836,57 @@ mpv's own stdout/stderr is never dumped at `INFO`. It is captured in a bounded
 buffer, emitted line-by-line only at `DEBUG` (`signage-controller --debug
 playback run`), and summarized in the `WARNING` above on an abnormal exit.
 
-## Pairing State
+## Local State
 
-By default, keys are stored at:
-
-```text
-$XDG_STATE_HOME/signage-controller/state.json
-```
-
-When `XDG_STATE_HOME` is unset, the default is:
+Two files live in the state directory, both holding credentials:
 
 ```text
-~/.local/state/signage-controller/state.json
+$XDG_STATE_HOME/signage-controller/state.json    LG TV pairing keys
+$XDG_STATE_HOME/signage-controller/device.json   device identity and enrollment
 ```
 
-The state directory is created with mode `0700` and the JSON file with mode
-`0600` where supported. An appliance install puts it at
-`/var/lib/signage-controller` instead, which both systemd units pass through
-`--state-dir`; it is outside the versioned install tree, so upgrades and
-rollbacks never touch pairing keys. Do not commit this state file.
+When `XDG_STATE_HOME` is unset, the default is
+`~/.local/state/signage-controller/`.
+
+The state directory is created with mode `0700` and each JSON file with mode
+`0600` where supported. Both are written atomically — a temporary file, fsynced
+and renamed into place — so an interrupted write cannot leave a half-written
+credential behind.
+
+An appliance install puts the directory at `/var/lib/signage-controller`
+instead, which every systemd unit passes through `--state-dir`. It is outside
+the versioned install tree, so upgrades and rollbacks never touch pairing keys
+or device identity. Do not commit these files.
+
+`device.json` holds the `device_token`, which is a credential in the same class
+as an LG client key: never printed, never logged, and absent from
+`signage-controller device status`. Deleting the state directory discards the
+appliance's identity — the host becomes a new installation and has to enroll
+again.
+
+Runtime lock files also live here — `controller.lock`, `playback.lock`, and
+`agent.lock` — one per independent runtime, which is what lets all three run at
+the same time.
 
 ## Deployment Shape
 
-Screenkeeper is not containerized. The TV controller and the mpv players run
-as two host-native processes on the same Linux machine — `signage-controller
-run` and `signage-controller playback run` — reading the same `config.yaml`
-and sharing the same state directory through independent locks. mpv needs
-direct access to that host's graphical session, and the controller only makes
-outbound LAN connections to each TV (it never listens for inbound traffic),
-so there is nothing a split or containerized deployment would buy here.
+Screenkeeper is not containerized. The TV controller, the mpv players, and the
+optional control-plane agent run as host-native processes on the same Linux
+machine — `signage-controller run`, `signage-controller playback run`, and
+`signage-controller agent run` — reading the same `config.yaml` and sharing the
+same state directory through independent locks. mpv needs direct access to that
+host's graphical session, and the appliance only makes outbound connections
+(never listening for inbound traffic), so there is nothing a split or
+containerized deployment would buy here.
 
-Both are ordinary foreground commands, and both are supervised by systemd user
+All are ordinary foreground commands, and all are supervised by systemd user
 units on an installed host:
 
 | Unit | Runs | Started by |
 | --- | --- | --- |
 | `screenkeeper.service` | `run` (TV control) | `default.target`, at boot with linger |
 | `screenkeeper-playback.service` | `playback run` (mpv) | `graphical-session.target` |
+| `screenkeeper-agent.service` | `agent run` (reporting) | Installed but **not enabled** |
 | `screenkeeper-upgrade.timer` | `upgrade` | Installed but **not enabled** |
 
 The playback unit is deliberately bound to `graphical-session.target` rather
@@ -663,11 +895,26 @@ session up automatically — autologin and kiosk desktop configuration — is pa
 of the deferred physical-display work under "Real-Hardware Validation" below.
 Until then, playback starts when the signage user's graphical session does.
 
-The two units are independent by design, matching the invariant that a TV
-being off must never stop playback and vice versa. Neither unit `Requires` the
-other, and `screenkeeper.service` deliberately declares no
-`network-online.target` dependency: the controller already treats an
-unreachable TV as normal and retries with capped backoff.
+The agent unit ships installed but disabled, because it is useless until a
+`control_plane:` section exists and the player has been claimed. Enable it once
+enrollment succeeds:
+
+```bash
+systemctl --user enable --now screenkeeper-agent.service
+```
+
+Existing installations are unaffected by its arrival. `signage-controller
+upgrade` refreshes it with `try-restart`, which does nothing unless the unit is
+already running, so an upgrade never starts an agent nobody enabled. If it is
+started without a `control_plane:` section it logs that fact and exits 0 rather
+than restart-looping.
+
+The units are independent by design, matching the invariant that a TV being off
+must never stop playback and vice versa — and that a control plane being
+unreachable stops neither. No unit `Requires` another, and neither
+`screenkeeper.service` nor `screenkeeper-agent.service` declares a
+`network-online.target` dependency: both already treat an unreachable peer as
+normal and retry with capped backoff.
 
 ## Updating
 
@@ -816,9 +1063,35 @@ The suite uses no real TV. It covers:
   version, building the venv at its final path, atomic activation and
   rollback, ignoring interrupted builds, pruning that never removes the
   active version, and update locking
+- Device identity: stable UUIDv4 installation ID, a 256-bit token, persistence
+  across restarts, `0700`/`0600` permissions, the token's absence from `repr`
+  and from `device status`, and a wiped state directory becoming a new
+  installation
+- Control-plane configuration: absent section still valid, malformed URL
+  rejected, plain HTTP rejected by default, loopback HTTP and an explicit
+  `allow_insecure_http` accepted
+- EDID parsing against committed binary fixtures: a valid blob, a truncated
+  read, a bad checksum, and a bad header — the last three reporting a hash and
+  inventing nothing
+- DRM inventory against a synthetic sysfs tree: connected and disconnected
+  connectors, missing and empty EDID, GPU vendor/device/driver, and a missing
+  `/sys/class/drm` yielding a valid empty inventory
+- Reported bindings: configured TVs without client keys, player `tv_id` and
+  screen mapping, and no local media path or telemetry credential in the
+  payload
+- Enrollment: creating an enrollment, the displayed code, pending and claimed
+  polls, an expired code starting a new enrollment without changing device
+  identity, and clear handling of an invalid credential
+- Heartbeat: the bearer header, a serialized report matching the contract, a
+  transient failure not killing the agent, backoff progression and jitter
+  bounds, recovery resetting failure state, an auth rejection backing off
+  heavily without touching identity, and clean shutdown
+- The shared contract: the committed `contracts/examples/*.json` matching what
+  the client produces and consumes, plus one end-to-end enrollment and
+  heartbeat over real HTTP against a loopback server
 
 None of the automated coverage above requires `mpv`, an X server, Wayland, a
-GPU, a physical display, or a real LG TV.
+GPU, a physical display, a real LG TV, or a real control plane.
 
 ## Real-TV Validation
 

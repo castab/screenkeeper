@@ -51,6 +51,8 @@ DEFAULT_REPOSITORY = "castab/screenkeeper"
 DEFAULT_INSTALL_ROOT = Path("/opt/screenkeeper")
 DEFAULT_KEEP_VERSIONS = 3
 DEFAULT_UNITS = ("screenkeeper.service", "screenkeeper-playback.service")
+# Refreshed only if already running: the agent unit ships installed but disabled.
+OPTIONAL_UNITS = ("screenkeeper-agent.service",)
 GITHUB_API_BASE = "https://api.github.com"
 CHECKSUM_ASSET_NAME = "SHA256SUMS"
 REQUEST_TIMEOUT = 60.0
@@ -514,6 +516,7 @@ def prune_versions(layout: InstallLayout, keep: int = DEFAULT_KEEP_VERSIONS) -> 
 def restart_services(
     units: Sequence[str] = DEFAULT_UNITS,
     *,
+    optional_units: Sequence[str] = OPTIONAL_UNITS,
     runner: Runner = default_runner,
 ) -> list[str]:
     """Restart the signage user units, returning the ones that did not restart.
@@ -521,6 +524,11 @@ def restart_services(
     A restart failure is reported but never unwinds the upgrade: the new
     version is already active, and an operator restart is a smaller problem
     than an automatic rollback nobody asked for.
+
+    `optional_units` get `try-restart` rather than `restart`, which is a no-op
+    when the unit is inactive. `restart` would *start* a unit that ships
+    installed-but-disabled, so an upgrade would silently turn on a control-plane
+    agent nobody enabled.
     """
     if shutil.which("systemctl") is None:
         LOGGER.info("systemctl is not available; restart the signage processes manually.")
@@ -534,4 +542,11 @@ def restart_services(
         except UpdateError as err:
             LOGGER.warning("Could not restart %s: %s", unit, err)
             failed.append(unit)
+    for unit in optional_units:
+        try:
+            runner(["systemctl", "--user", "try-restart", unit])
+        except UpdateError as err:
+            # Not reported as failed: this unit is expected to be absent or
+            # inactive on the installations that never enabled it.
+            LOGGER.debug("Could not try-restart %s: %s", unit, err)
     return failed

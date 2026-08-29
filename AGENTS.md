@@ -2,8 +2,8 @@
 
 ## Project Purpose
 
-`signage-controller` is a small Linux appliance component that manages two
-independent desired states for digital signage:
+`signage-controller` is a small Linux appliance component — Screenkeeper Edge —
+that manages three independent concerns for digital signage:
 
 1. LG webOS television control over the LAN (Phase 1): converges each
    configured TV to a desired HDMI input and absolute volume. One `run`
@@ -12,10 +12,27 @@ independent desired states for digital signage:
    looping fullscreen per configured player, independent of whether the
    associated TV is reachable. One `playback run` process owns one
    asynchronous supervisor per configured player.
+3. Device identity, inventory, and reporting (Phase 3): gives the appliance a
+   permanent identity, lets an administrator claim it with a short pairing
+   code, and reports observed display hardware and configured bindings to an
+   optional control plane. One `agent run` process, outbound-only.
 
-Both subsystems are configuration-driven from the same YAML file and are
+All three are configuration-driven from the same YAML file and are
 intentionally kept architecturally independent — see Behavioral Invariants
 below.
+
+This repository is a monorepo. The player application stays at the repository
+root; `contracts/` holds the shared API contract, and `control/` holds the
+Screenkeeper Control application. The two applications depend on the contract,
+never on each other's modules, so they remain independently deployable.
+
+`control/` is the Screenkeeper Control server: Kotlin/Gradle, http4k, Jdbi,
+Flyway, PostgreSQL (see `control/AGENTS.md` and `control/README.md`). It
+implements `contracts/openapi.yaml` as the server side. Unlike the player,
+`control/` is expected to run in Docker for development and deployment
+(`control/Dockerfile`, `control/compose.dev.yaml`) -- the "deliberately not
+containerized" invariant below is about the player only and does not extend
+to `control/`.
 
 Keep the project deliberately boring and reliable. Prefer standard-library
 Python, asyncio, explicit YAML configuration, local network/host control, and
@@ -56,8 +73,11 @@ When the working directory is a Windows path, run everything through WSL
 rather than reporting the suite as unrunnable:
 
 ```bash
-wsl -d Ubuntu -- bash -lc 'cd /mnt/<drive>/path/to/screenkeeper && ~/screenkeeper-venv/bin/pytest -q'
+wsl -d Ubuntu -- bash -lc 'cd /mnt/<drive>/path/to/screenkeeper && ~/sk-venv/bin/pytest -q'
 ```
+
+The venv path is whatever you created; `~/sk-venv` is the one on the current
+development machine.
 
 - Keep the venv on the Linux filesystem (`$HOME`), not under `/mnt/`. Unix
   permissions and speed both suffer on a Windows drive, and the state-store
@@ -75,23 +95,50 @@ Also run syntax and whitespace checks after code changes:
 git diff --check
 ```
 
-Tests must not require a real TV. Extend the fake television in
-`tests/conftest.py` and add focused async pytest coverage for controller or
-adapter changes.
+Tests must not require a real TV, a real control plane, GitHub, mpv, or an X
+server. Extend the fakes in `tests/conftest.py` — `FakeTelevision`,
+`FakeProcessLauncher`, `FakeTransport` (an injected control-plane transport),
+and `FakeControlPlaneServer` (a loopback HTTP server for end-to-end contract
+coverage) — and add focused async pytest coverage for behavior changes.
+
+Prefer injecting a collaborator over monkeypatching: `opener`, `runner`,
+`launcher`, `factory`, `transport`, and `sysfs_root` all exist for that.
 
 ## Source Layout
 
 - `config.py`: typed YAML parsing and validation.
-- `state_store.py`: local, permission-restricted pairing-key persistence.
+- `state_store.py`: local, permission-restricted pairing-key persistence, plus
+  the `write_json_atomic` helper the device store shares.
+- `http_client.py`: the no-redirect opener and JSON request helper shared by
+  `observability.py` and the control-plane client. Redirects are refused so a
+  30x can never hand a bearer token to another host. `updater.py` keeps its own
+  GitHub-specific opener.
+- `inventory/edid.py`: a deliberately small EDID reader. Always reports a
+  SHA-256 of the raw bytes; every descriptive field is optional and omitted
+  rather than guessed.
+- `inventory/drm.py`: `/sys/class/drm` connector and GPU discovery. Reads sysfs
+  rather than shelling out to `xrandr` or `drm_info`, so it works headless.
+- `control_plane/identity.py`: `installation_id` and `device_token` persistence
+  under `$STATE_DIR/device.json`.
+- `control_plane/client.py`: the only implementation of
+  `contracts/openapi.yaml` on the edge side. Its error taxonomy drives retry
+  policy: unavailable is retried, an auth rejection is not.
+- `control_plane/report.py`: the sanitization boundary. Everything sent to the
+  control plane is assembled here from an allowlist.
+- `control_plane/enrollment.py`: the operator-initiated pairing-code workflow.
+- `control_plane/agent.py`: the heartbeat loop, mirroring `PlayerSupervisor`'s
+  supervision shape.
 - `tv/base.py`: narrow `Television` abstraction used by controller tests.
 - `tv/lg_webos.py`: the only layer that depends on `aiowebostv`.
 - `controller.py`: desired-state convergence, retry lifecycle, delayed
   reconciliation, and state interpretation.
 - `cli.py`: `pair`, `status`, `inputs`, `apply`, `run`, the `playback`
-  command group (`check`, `command`, `start`, `run`), and the installation
-  commands (`upgrade`, `rollback`, `versions`). The installation commands are
-  dispatched before `load_config` and must stay that way: an upgrade has to
-  work on a host whose `config.yaml` is missing or broken.
+  command group (`check`, `command`, `start`, `run`), the `device` command
+  group (`status`, `inventory`, `enroll`), the `agent` command group (`run`),
+  and the installation commands (`upgrade`, `rollback`, `versions`). The
+  installation commands are dispatched before `load_config` and must stay that
+  way: an upgrade has to work on a host whose `config.yaml` is missing or
+  broken.
 - `updater.py`: release resolution, checksum verification, versioned venv
   builds, atomic activation/rollback, pruning, and the update lock. Network
   access and subprocess execution are injected (`opener`, `runner`) so tests
@@ -101,9 +148,9 @@ adapter changes.
 - `packaging/*.service`, `packaging/*.timer`: systemd user units, templated
   with `@INSTALL_ROOT@`, `@CONFIG_DIR@`, and `@STATE_DIR@` by the installer.
 - `runtime_lock.py`: prevents concurrent processes sharing one lock name in
-  one state directory. TV `run` and `playback run` use separate lock names
-  (`controller.lock` / `playback.lock`) so they can run concurrently, since
-  they are independent runtimes by design.
+  one state directory. TV `run`, `playback run`, and `agent run` use separate
+  lock names (`controller.lock` / `playback.lock` / `agent.lock`) so they can
+  run concurrently, since they are independent runtimes by design.
 - `playback/mpv.py`: pure mpv argv construction (`build_mpv_argv`) and the
   `MpvPlayer` process-lifecycle abstraction (start/stop/query). The only
   module that calls `asyncio.create_subprocess_exec` for mpv.
@@ -146,6 +193,58 @@ releases.
   session those units depend on is still part of the deferred work, which is
   why `screenkeeper-playback.service` binds to `graphical-session.target`
   instead of provisioning one.
+- Control-plane connectivity (Phase 3) is implemented and authorized: permanent
+  device identity, pairing-code enrollment, Linux hardware/display inventory,
+  heartbeat reporting, the `agent run` runtime, the shared contract under
+  `contracts/`, and `screenkeeper-agent.service`. Keep it a small slice. The
+  following remain unauthorized without a further explicit grant: remote
+  content distribution, object storage, playlists, schedules, deployment
+  manifests, remote desired-configuration application, NATS/JetStream, remote
+  shell, arbitrary server-issued commands, remote Linux administration, and
+  additional television drivers. Leave extension points, not unused
+  abstraction layers.
+- The control plane is optional and must stay optional. Absence of a
+  `control_plane:` section preserves current behavior exactly, and none of
+  `run`, `playback run`, `pair`, `status`, `inputs`, `apply`, or
+  `playback start` may require it. The appliance is fully functional offline.
+- The agent is a peer of the other two runtimes, never a supervisor. It must
+  not import or drive `Television` or `MpvPlayer`, and a control-plane outage,
+  an auth rejection, or an agent crash must not affect TV convergence or mpv
+  playback — nor may either of those stop heartbeats.
+- Communication is outbound-only. Do not add an HTTP server on the player, port
+  forwarding, remote shell, SSH exposure, or control-plane callbacks. The
+  player initiates every request.
+- Device identity is permanent. Generate `installation_id` and `device_token`
+  once, on first use, and never regenerate them to repair an authentication
+  failure — a new token abandons the enrollment an administrator claimed and
+  makes the player unrecoverable. Upgrades and rollbacks must not replace them.
+  A wiped state directory is a new installation and legitimately gets a new
+  identity.
+- The device token is a credential. Never print, log, commit, put it in YAML,
+  or include it in `device status` output. It is `repr`-excluded on
+  `DeviceIdentity` for this reason.
+- Never infer the player's physical location from public IP, GPS, Wi-Fi SSID,
+  hostname, timezone, or network topology. The control plane assigns the
+  organization and location during enrollment. `hostname` is reported as an
+  operational label only.
+- Reported data is allowlisted in `control_plane/report.py`, never serialized
+  wholesale from configuration. Never report LG client keys, the device token,
+  bearer tokens, observability credentials, or local media paths.
+- Keep observed and configured state separate in the heartbeat. `inventory` is
+  what the kernel sees; `configured_bindings` is what an operator wrote. The
+  control plane compares them, so merging them destroys the signal.
+- Inventory collection is best-effort and must never raise. Partial data on
+  WSL, VMs, headless hosts, and unusual drivers is expected, and no DRM devices
+  at all is a valid result.
+- Enrollment is operator-initiated. Do not request enrollments automatically
+  from a long-running daemon.
+- Distinguish `401`/`403` from a transient network failure. Log an actionable
+  error and back off heavily rather than retrying a rejected credential at
+  heartbeat frequency, and log control-plane reachability transitions rather
+  than every failed retry.
+- Within `/api/v1`, evolve the contract additively: tolerate unknown response
+  fields, and never require edge and control releases to match versions. The
+  monorepo gives coordinated development, not lockstep deployment.
 - Never mute the TV as a substitute for setting `desired_volume: 0`.
 - Desired-state changes are idempotent: read actual input and volume, then send
   only the command needed for a mismatch.
@@ -175,6 +274,12 @@ releases.
   retaining at least one prior version.
 - The unattended-upgrade timer ships installed but disabled. Do not enable it
   by default; an upgrade restarts playback.
+- `screenkeeper-agent.service` ships installed but disabled, for the same
+  reason and because it is useless before enrollment. `restart_services`
+  therefore uses `try-restart` for it, not `restart`: `restart` would *start*
+  the agent on every host that never enabled it. `agent run` exits 0 when no
+  `control_plane:` section exists, so a manually started unit stops cleanly
+  instead of restart-looping.
 - `__version__` in `src/signage_controller/__init__.py` is the single source of
   truth for the version. `pyproject.toml` reads it dynamically. Do not
   reintroduce a hardcoded `version =` in `pyproject.toml`, and do not let a
@@ -183,7 +288,10 @@ releases.
 
 ## State And Security
 
-- Client keys are credentials. Never hardcode, commit, print, or log them.
+- Client keys and the device token are credentials. Never hardcode, commit,
+  print, or log them. `state.json` holds pairing keys; `device.json` holds the
+  device token. Both are `0600` inside a `0700` directory, written through
+  `state_store.write_json_atomic`.
 - Default runtime state is under `$XDG_STATE_HOME/signage-controller/` or
   `~/.local/state/signage-controller/`; production can use
   `/var/lib/signage-controller/` through `--state-dir`.
@@ -201,6 +309,11 @@ releases.
   explicitly requested that external action — both launch a real mpv process
   against the host's graphical session. `playback check` and
   `playback command` are diagnostic-only and never launch mpv.
+- Do not run `device enroll` or `agent run` against a real control plane
+  without an explicit request: enrollment registers this host with a remote
+  service, and the agent reports to it continuously. `device status` and
+  `device inventory` are local and read-only — `inventory` contacts nothing and
+  `status` does not even create an identity.
 - Do not run `scripts/install.sh` without an explicit request: it requires
   root, creates a system account, and writes outside the repository.
   `signage-controller upgrade` mutates a real installation and restarts units,
@@ -210,8 +323,12 @@ releases.
 
 - Update `README.md` and `config.example.yaml` when configuration keys, CLI
   behavior, timing, logging, or commissioning steps change — this applies to
-  `playback:` keys and playback CLI commands exactly as it does to `tvs:`
-  keys and TV commands.
+  `playback:` and `control_plane:` keys and their CLI commands exactly as it
+  does to `tvs:` keys and TV commands.
+- `contracts/openapi.yaml` is the source of truth for edge/control
+  communication. Change it before changing either side's code, keep
+  `contracts/examples/*.json` in step (`tests/test_contracts.py` enforces
+  this), and do not generate a client from the control application.
 - Keep `README.md`, `scripts/install.sh`, and `packaging/` consistent when the
   install layout, unit names, or update flow change. The installer and
   `updater.py` maintain the same tree, so a change to one is a change to both.

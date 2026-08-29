@@ -26,6 +26,19 @@ tvs:
     desired_input: HDMI_1
     desired_volume: 0
 
+# Optional Screenkeeper Control connectivity, used only by `signage-controller
+# device ...` and `signage-controller agent run`. Leaving this out keeps the
+# appliance entirely local: TV control and mpv playback never consult it, and
+# signage keeps running when the WAN is down. The player initiates every
+# request, so no inbound access to this host is required.
+# control_plane:
+#   base_url: https://screenkeeper.example.com
+#   heartbeat_interval: 30
+#   request_timeout: 10
+#   # HTTPS is required. Plain HTTP is accepted only for a loopback host, or
+#   # when this is explicitly set for local development against a dev server.
+#   # allow_insecure_http: false
+
 # Optional local mpv signage playback, independent of TV control above.
 # Requires mpv installed on this host; used only by `signage-controller
 # playback ...` commands. See README.md for the full walkthrough.

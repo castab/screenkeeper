@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import json
 import logging
 import os
 import shlex
@@ -14,7 +15,12 @@ from pathlib import Path
 
 from . import __version__
 from .config import ApplicationConfig, ConfigurationError, PlaybackConfig, TvConfig, load_config
+from .control_plane.agent import run_agent
+from .control_plane.client import ControlPlaneClient, ControlPlaneError
+from .control_plane.enrollment import enroll
+from .control_plane.identity import DeviceStore
 from .controller import DesiredInputError, converge, run_all
+from .inventory.drm import Inventory, collect_inventory
 from .observability import LokiHandler, ObservabilityError, PrometheusStatusReporter
 from .playback.mpv import MpvPlayer, build_mpv_argv, default_launcher
 from .playback.supervisor import resolve_socket_dir, run_playback
@@ -71,6 +77,25 @@ def build_parser() -> argparse.ArgumentParser:
     playback_start_parser = playback_commands.add_parser("start")
     playback_start_parser.add_argument("player_id")
     playback_commands.add_parser("run")
+
+    device_parser = commands.add_parser(
+        "device", help="Device identity, hardware inventory, and control-plane enrollment."
+    )
+    device_commands = device_parser.add_subparsers(dest="device_command", required=True)
+    device_commands.add_parser("status", help="Show identity and enrollment, never the token.")
+    device_inventory_parser = device_commands.add_parser(
+        "inventory", help="Show locally observed display hardware. Contacts nothing."
+    )
+    device_inventory_parser.add_argument(
+        "--json", action="store_true", dest="as_json", help="Emit JSON for diagnostics."
+    )
+    device_commands.add_parser("enroll", help="Claim this player with a pairing code.")
+
+    agent_parser = commands.add_parser(
+        "agent", help="Outbound-only control-plane agent, independent of TV and playback."
+    )
+    agent_commands = agent_parser.add_subparsers(dest="agent_command", required=True)
+    agent_commands.add_parser("run")
 
     upgrade_parser = commands.add_parser(
         "upgrade", help="Install and activate the latest published release."
@@ -153,6 +178,10 @@ async def _run(args: argparse.Namespace) -> int:
         return await _run_daemon(config, state_store)
     if args.command == "playback":
         return await _run_playback_command(args, config, state_store)
+    if args.command == "device":
+        return await _run_device_command(args, config, state_store)
+    if args.command == "agent":
+        return await _run_agent_command(args, config, state_store)
 
     tv_config = config.get_tv(args.tv_id)
     television = _make_television(tv_config, state_store)
@@ -409,6 +438,181 @@ async def _playback_run(config: ApplicationConfig, state_store: StateStore) -> i
             state_store.state_dir, name="playback.lock", command="playback run"
         ):
             await run_playback(playback, stop_event)
+    except ControllerAlreadyRunningError as err:
+        LOGGER.error("%s", err)
+        return 1
+    return 0
+
+
+async def _run_device_command(
+    args: argparse.Namespace, config: ApplicationConfig, state_store: StateStore
+) -> int:
+    if args.device_command == "inventory":
+        # Deliberately first, and deliberately without a DeviceStore: inventory
+        # is a local hardware question that must not create identity or touch
+        # the network.
+        return _device_inventory(args.as_json)
+    device_store = DeviceStore(state_store.state_dir)
+    if args.device_command == "status":
+        return _device_status(config, device_store)
+    if args.device_command == "enroll":
+        return await _device_enroll(config, device_store)
+    raise AssertionError(f"Unhandled device command {args.device_command}")
+
+
+async def _run_agent_command(
+    args: argparse.Namespace, config: ApplicationConfig, state_store: StateStore
+) -> int:
+    if args.agent_command == "run":
+        return await _agent_run(config, state_store)
+    raise AssertionError(f"Unhandled agent command {args.agent_command}")
+
+
+def _make_client(config: ApplicationConfig) -> ControlPlaneClient | None:
+    if config.control_plane is None:
+        LOGGER.error(
+            "No 'control_plane' section is configured; add one with a 'base_url' to enroll."
+        )
+        return None
+    return ControlPlaneClient(
+        config.control_plane.base_url, timeout=config.control_plane.request_timeout
+    )
+
+
+def _device_status(config: ApplicationConfig, device_store: DeviceStore) -> int:
+    """Print identity and enrollment. The device token is never shown."""
+    identity = device_store.load()
+    if identity is None:
+        print("Installation ID: (none yet — generated on first enrollment)")
+        print("Enrollment: not enrolled")
+    else:
+        print(f"Installation ID: {identity.installation_id}")
+        print(f"Enrollment: {'enrolled' if identity.is_enrolled else 'not enrolled'}")
+        if identity.is_enrolled:
+            print(f"Player ID: {identity.player_id}")
+            print(f"Player name: {identity.player_name or 'unknown'}")
+            print(f"Organization: {identity.organization_name or 'unknown'}")
+            print(f"Location: {identity.location_name or 'unknown'}")
+            print(f"Enrolled at: {identity.enrolled_at or 'unknown'}")
+
+    control_plane = config.control_plane
+    print(f"Control plane: {control_plane.base_url if control_plane else '(not configured)'}")
+    if identity is not None:
+        print(f"Last heartbeat: {identity.last_heartbeat_at or 'never'}")
+    return 0
+
+
+def _device_inventory(as_json: bool) -> int:
+    """Print observed display hardware. Never contacts the control plane."""
+    inventory = collect_inventory()
+    if as_json:
+        print(json.dumps(inventory.to_dict(), indent=2, sort_keys=True))
+        return 0
+    _print_inventory(inventory)
+    return 0
+
+
+def _print_inventory(inventory: Inventory) -> None:
+    if not inventory.gpus:
+        print("GPUs: (none detected)")
+    else:
+        print("GPUs:")
+        for gpu in inventory.gpus:
+            details = [
+                f"vendor={gpu.vendor_id}" if gpu.vendor_id else "",
+                f"device={gpu.device_id}" if gpu.device_id else "",
+                f"driver={gpu.driver}" if gpu.driver else "",
+            ]
+            suffix = "  ".join(detail for detail in details if detail)
+            print(f"  {gpu.card}{'  ' + suffix if suffix else ''}")
+
+    if not inventory.connectors:
+        # Normal on a headless host, a VM, or WSL — not a failure.
+        print("Connectors: (none detected)")
+        return
+    print("Connectors:")
+    for connector in inventory.connectors:
+        state = connector.status or "unknown"
+        if connector.enabled is not None:
+            state += ", enabled" if connector.enabled else ", disabled"
+        print(f"  {connector.name}: {state}")
+        if connector.modes:
+            preview = ", ".join(connector.modes[:3])
+            more = f" (+{len(connector.modes) - 3} more)" if len(connector.modes) > 3 else ""
+            print(f"    modes: {preview}{more}")
+        if connector.edid is not None:
+            edid = connector.edid
+            described = "  ".join(
+                part
+                for part in (
+                    edid.manufacturer or "",
+                    edid.product_name or "",
+                    f"serial={edid.serial}" if edid.serial else "",
+                )
+                if part
+            )
+            print(f"    edid: {edid.sha256[:16]}…{'  ' + described if described else ''}")
+
+
+async def _device_enroll(config: ApplicationConfig, device_store: DeviceStore) -> int:
+    """Run the pairing-code workflow. Needs neither a TV nor mpv."""
+    client = _make_client(config)
+    if client is None:
+        return 1
+
+    # Generating identity here, not at import or on status, keeps a host that
+    # never enrolls free of a credential it has no use for.
+    identity = device_store.load_or_create()
+    if identity.is_enrolled:
+        print(f"This player is already enrolled as {identity.player_name or identity.player_id}.")
+        print("Enrolling again is only necessary after the control plane removed this player.")
+
+    stop_event = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for signum in (signal.SIGINT, signal.SIGTERM):
+        with contextlib.suppress(NotImplementedError):
+            loop.add_signal_handler(signum, stop_event.set)
+
+    try:
+        claimed = await enroll(client, device_store, identity, stop_event)
+    except ControlPlaneError as err:
+        LOGGER.error("%s", err)
+        return 1
+    if claimed is None:
+        print("\nEnrollment cancelled. This player's identity is unchanged.")
+        return 1
+    return 0
+
+
+async def _agent_run(config: ApplicationConfig, state_store: StateStore) -> int:
+    """Run the heartbeat agent under its own lock, independent of TV and playback."""
+    control_plane = config.control_plane
+    if control_plane is None:
+        # Exit 0, not an error: the unit ships installed-but-disabled, and an
+        # operator who starts it before configuring a control plane should get a
+        # clean stop rather than a restart loop.
+        LOGGER.info("No 'control_plane' section is configured; the agent has nothing to report.")
+        return 0
+
+    device_store = DeviceStore(state_store.state_dir)
+    identity = device_store.load()
+    if identity is None or not identity.is_enrolled:
+        LOGGER.error(
+            "This player is not enrolled. Run 'signage-controller device enroll' first."
+        )
+        return 1
+
+    stop_event = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for signum in (signal.SIGINT, signal.SIGTERM):
+        with contextlib.suppress(NotImplementedError):
+            loop.add_signal_handler(signum, stop_event.set)
+
+    try:
+        with acquire_controller_lock(
+            state_store.state_dir, name="agent.lock", command="agent run"
+        ):
+            await run_agent(config, control_plane, device_store, identity, stop_event)
     except ControllerAlreadyRunningError as err:
         LOGGER.error("%s", err)
         return 1

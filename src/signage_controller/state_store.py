@@ -21,6 +21,35 @@ def default_state_dir() -> Path:
     return Path.home() / ".local" / "state" / "signage-controller"
 
 
+def write_json_atomic(state_dir: Path, path: Path, data: Any) -> None:
+    """Replace a state file in one step, leaving no partial or readable-by-all copy.
+
+    Every file this writes may hold a credential — a TV pairing key, the device
+    token — so the directory stays `0700` and the file `0600`, and the content
+    is fsynced before the rename rather than after.
+    """
+    try:
+        state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        os.chmod(state_dir, 0o700)
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=".state-", suffix=".json", dir=state_dir, text=True
+        )
+        temporary_path = Path(temporary_name)
+        try:
+            os.fchmod(descriptor, 0o600)
+            with os.fdopen(descriptor, "w", encoding="utf-8") as state_file:
+                json.dump(data, state_file, indent=2, sort_keys=True)
+                state_file.write("\n")
+                state_file.flush()
+                os.fsync(state_file.fileno())
+            os.replace(temporary_path, path)
+        except Exception:
+            temporary_path.unlink(missing_ok=True)
+            raise
+    except OSError as err:
+        raise StateStoreError(f"Could not save state file {path}: {err}") from err
+
+
 class StateStore:
     """Store client keys keyed by configured television ID."""
 
@@ -68,23 +97,4 @@ class StateStore:
         return data
 
     def _save(self, data: dict[str, dict[str, str]]) -> None:
-        try:
-            self.state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-            os.chmod(self.state_dir, 0o700)
-            descriptor, temporary_name = tempfile.mkstemp(
-                prefix=".state-", suffix=".json", dir=self.state_dir, text=True
-            )
-            temporary_path = Path(temporary_name)
-            try:
-                os.fchmod(descriptor, 0o600)
-                with os.fdopen(descriptor, "w", encoding="utf-8") as state_file:
-                    json.dump(data, state_file, indent=2, sort_keys=True)
-                    state_file.write("\n")
-                    state_file.flush()
-                    os.fsync(state_file.fileno())
-                os.replace(temporary_path, self.path)
-            except Exception:
-                temporary_path.unlink(missing_ok=True)
-                raise
-        except OSError as err:
-            raise StateStoreError(f"Could not save state file {self.path}: {err}") from err
+        write_json_atomic(self.state_dir, self.path, data)

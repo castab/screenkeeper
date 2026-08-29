@@ -1,0 +1,13 @@
+{
+  "location": {
+    "id": "019254c1-8a1d-7f42-b0c3-5d6e7f8a9b0c",
+    "name": "Downtown"
+  },
+  "organization": {
+    "id": "019254c1-8a1d-7f42-b0c3-1a2b3c4d5e6f",
+    "name": "Example Restaurant"
+  },
+  "player_id": "019254c1-9c2e-7a13-8d4f-6e7f8a9b0c1d",
+  "player_name": "Main Menu Wall",
+  "status": "claimed"
+}
