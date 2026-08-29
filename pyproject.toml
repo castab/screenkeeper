@@ -45,6 +45,8 @@ include = [
   "tests",
   "packaging",
   "scripts",
+  # The shared API contract; tests/test_contracts.py checks the edge against it.
+  "contracts",
   "README.md",
   "AGENTS.md",
   "config.example.yaml",

@@ -6,3 +6,7 @@
 *.sh text eol=lf
 *.service text eol=lf
 *.timer text eol=lf
+
+# EDID test fixtures are raw display bytes; line-ending normalization would
+# corrupt them and break their checksums.
+*.bin binary

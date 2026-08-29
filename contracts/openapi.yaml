@@ -1,0 +1,576 @@
+openapi: 3.1.0
+
+info:
+  title: Screenkeeper Control API
+  version: "1.0.0"
+  description: |
+    The contract between Screenkeeper Edge (the signage appliance) and
+    Screenkeeper Control (the control plane).
+
+    The appliance initiates every request. The control plane never calls the
+    appliance: there is no callback, no webhook, and no inbound port on a
+    Screenkeeper host.
+
+    This phase covers identity and observed state only. Desired-state
+    distribution, content deployment, and remote commands are deliberately not
+    part of this contract yet.
+
+    Compatibility rule: clients must tolerate unknown response fields, servers
+    should tolerate unknown request fields, and evolution within /api/v1 is
+    additive. See contracts/README.md.
+
+servers:
+  - url: https://screenkeeper.example.com/api/v1
+    description: Production control plane. The appliance appends /api/v1 to the
+      operator-configured control_plane.base_url.
+  - url: http://127.0.0.1:8080/api/v1
+    description: Local development. Plain HTTP is accepted by the appliance only
+      for a loopback host, or when control_plane.allow_insecure_http is true.
+
+tags:
+  - name: enrollment
+    description: Claiming an appliance with a short-lived pairing code.
+  - name: reporting
+    description: Outbound observed-state reporting from an enrolled appliance.
+
+paths:
+  /enrollments:
+    post:
+      tags: [enrollment]
+      operationId: createEnrollment
+      summary: Request an enrollment and receive a pairing code
+      description: |
+        Called by an operator running `signage-controller device enroll` on the
+        appliance. It is never called automatically by a long-running daemon.
+
+        The request carries the device token so the server can hash and store it
+        against the pending enrollment; the same token becomes the player's
+        permanent API credential once an administrator claims it. The server
+        must never return the token.
+
+        Requesting a second enrollment for an `installation_id` that already has
+        a pending one supersedes it. An appliance whose code expired retries
+        this operation with an unchanged `installation_id` and `device_token`.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EnrollmentRequest"
+            examples:
+              default:
+                $ref: "#/components/examples/EnrollmentRequest"
+      responses:
+        "201":
+          description: Enrollment created and awaiting an administrator claim.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EnrollmentCreated"
+              examples:
+                default:
+                  $ref: "#/components/examples/EnrollmentCreated"
+        "400":
+          description: Malformed request.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: |
+            This installation is already enrolled with a different credential.
+            The appliance reports this and stops; it must never resolve the
+            conflict by generating a new identity.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /enrollments/{enrollment_id}:
+    get:
+      tags: [enrollment]
+      operationId: getEnrollment
+      summary: Poll whether an enrollment has been claimed
+      description: |
+        Polled by the appliance at the cadence the server advertised in
+        `poll_interval_seconds`. Authenticated with the device token supplied in
+        the enrollment request, which proves the poller is the same appliance.
+      parameters:
+        - name: enrollment_id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: The identifier returned by createEnrollment.
+      responses:
+        "200":
+          description: Current enrollment state.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EnrollmentState"
+              examples:
+                pending:
+                  summary: Not yet claimed
+                  value:
+                    status: pending
+                claimed:
+                  $ref: "#/components/examples/EnrollmentClaimed"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: |
+            Unknown enrollment. Also returned once an expired enrollment has
+            been reaped. The appliance treats this like an explicit `expired`
+            status: it requests a new enrollment with the same identity.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "410":
+          description: |
+            The enrollment expired before it was claimed. The appliance requests
+            a new one with the same identity and displays the new code.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /players/{player_id}/heartbeat:
+    post:
+      tags: [reporting]
+      operationId: sendHeartbeat
+      summary: Report the appliance's current observed state
+      description: |
+        A snapshot of what the appliance sees right now, not an event log. The
+        server keeps the latest report; historical reporting is a later phase.
+
+        Sent on the appliance's configured `heartbeat_interval` by
+        `signage-controller agent run`. A failed heartbeat is retried with
+        bounded exponential backoff and never affects TV control or mpv
+        playback on the appliance.
+      parameters:
+        - name: player_id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: The identifier assigned when the enrollment was claimed.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/HeartbeatRequest"
+            examples:
+              default:
+                $ref: "#/components/examples/Heartbeat"
+      responses:
+        "202":
+          description: |
+            Report accepted. The body is currently empty and reserved for a
+            future desired-state response; the appliance ignores it.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HeartbeatAccepted"
+        "204":
+          description: Report accepted with no response body.
+        "400":
+          description: Malformed report.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: Unknown player.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+components:
+  securitySchemes:
+    deviceToken:
+      type: http
+      scheme: bearer
+      description: |
+        The `device_token` the appliance generated for itself and sent once
+        during enrollment. It is the appliance's permanent API credential. The
+        server stores only a hash of it and never returns it.
+
+  examples:
+    # Held as files rather than inline so the edge test suite can assert the
+    # implementation still produces and accepts exactly these shapes.
+    EnrollmentRequest:
+      summary: Enrollment request from an unenrolled appliance
+      externalValue: ./examples/enrollment-request.json
+    EnrollmentCreated:
+      summary: Pairing code issued and awaiting a claim
+      externalValue: ./examples/enrollment-created.json
+    EnrollmentClaimed:
+      summary: Claimed by an administrator and assigned a location
+      externalValue: ./examples/enrollment-claimed.json
+    Heartbeat:
+      summary: Observed state and configured bindings from an enrolled appliance
+      externalValue: ./examples/heartbeat.json
+
+  responses:
+    Unauthorized:
+      description: |
+        Missing or invalid credential. Distinct from a transient network
+        failure: the appliance logs an actionable error and backs off heavily
+        rather than retrying at heartbeat frequency, and never repairs this by
+        generating a new identity.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Forbidden:
+      description: The credential is valid but not permitted for this resource.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    RateLimited:
+      description: Too many requests. Treated by the appliance as a transient failure.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Unavailable:
+      description: |
+        The control plane is temporarily unavailable. This is a normal condition
+        for a signage appliance and never interrupts local signage operation.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+
+  schemas:
+    EnrollmentRequest:
+      type: object
+      additionalProperties: true
+      required: [installation_id, device_token, screenkeeper_version, hostname]
+      properties:
+        installation_id:
+          type: string
+          format: uuid
+          description: Stable public identity generated by the appliance.
+          examples: ["70b3f02f-6f6c-4f0d-8f4a-2f5f1b0c9d21"]
+        device_token:
+          type: string
+          minLength: 32
+          writeOnly: true
+          description: |
+            The appliance's self-generated 256-bit credential. Transmitted only
+            over the configured HTTPS connection. Hash it; never store, log, or
+            return it in cleartext.
+        screenkeeper_version:
+          type: string
+          description: The appliance's reported version.
+          examples: ["0.1.0"]
+        hostname:
+          type: string
+          description: |
+            Operational label only. It is never used to infer the player's
+            physical location.
+          examples: ["menu-player-01"]
+
+    EnrollmentCreated:
+      type: object
+      additionalProperties: true
+      required: [enrollment_id, code, expires_at, poll_interval_seconds]
+      properties:
+        enrollment_id:
+          type: string
+          description: Identifier the appliance polls.
+        code:
+          type: string
+          description: |
+            Short-lived, human-facing pairing code displayed on the appliance
+            and typed by an administrator. Not a credential.
+          examples: ["Q7KM-4HF2"]
+        expires_at:
+          type: string
+          format: date-time
+          description: UTC instant after which the code stops being claimable.
+        poll_interval_seconds:
+          type: integer
+          minimum: 1
+          description: How often the appliance should poll.
+          examples: [5]
+
+    EnrollmentState:
+      type: object
+      additionalProperties: true
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [pending, claimed, expired]
+        player_id:
+          type: string
+          description: Present when status is claimed.
+        player_name:
+          type: string
+          description: Present when status is claimed.
+        organization:
+          $ref: "#/components/schemas/NamedEntity"
+        location:
+          $ref: "#/components/schemas/NamedEntity"
+
+    NamedEntity:
+      type: object
+      additionalProperties: true
+      required: [id, name]
+      description: |
+        An organization or location the control plane assigned during the claim.
+        The appliance stores these as opaque non-secret metadata for display.
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+
+    HeartbeatRequest:
+      type: object
+      additionalProperties: true
+      required: [reported_at, agent, inventory, configured_bindings]
+      properties:
+        reported_at:
+          type: string
+          format: date-time
+          description: UTC instant the snapshot was taken.
+        agent:
+          $ref: "#/components/schemas/AgentInfo"
+        inventory:
+          $ref: "#/components/schemas/Inventory"
+        configured_bindings:
+          $ref: "#/components/schemas/ConfiguredBindings"
+
+    HeartbeatAccepted:
+      type: object
+      additionalProperties: true
+      description: |
+        Reserved. Desired-state distribution is a later phase; the appliance
+        ignores every field here today.
+
+    AgentInfo:
+      type: object
+      additionalProperties: true
+      required: [screenkeeper_version, hostname, os]
+      properties:
+        screenkeeper_version:
+          type: string
+        hostname:
+          type: string
+        os:
+          type: string
+          examples: ["Linux"]
+        kernel:
+          type: string
+          examples: ["6.8.0-45-generic"]
+        architecture:
+          type: string
+          examples: ["x86_64"]
+
+    Inventory:
+      type: object
+      additionalProperties: true
+      required: [gpus, connectors]
+      description: |
+        What the Linux kernel reports through /sys/class/drm. Collection is
+        best-effort and degrades to partial data on VMs, WSL, headless servers,
+        and unusual drivers. Empty arrays are a valid result, not an error.
+      properties:
+        gpus:
+          type: array
+          items:
+            $ref: "#/components/schemas/Gpu"
+        connectors:
+          type: array
+          items:
+            $ref: "#/components/schemas/Connector"
+
+    Gpu:
+      type: object
+      additionalProperties: true
+      required: [card]
+      description: Best-effort GPU identity read from sysfs.
+      properties:
+        card:
+          type: string
+          examples: ["card0"]
+        vendor_id:
+          type: string
+          examples: ["0x8086"]
+        device_id:
+          type: string
+          examples: ["0x5912"]
+        driver:
+          type: string
+          examples: ["i915"]
+
+    Connector:
+      type: object
+      additionalProperties: true
+      required: [name]
+      description: One DRM connector, whether or not anything is attached to it.
+      properties:
+        name:
+          type: string
+          description: Connector name with the cardN- prefix stripped.
+          examples: ["DP-1"]
+        status:
+          type: string
+          description: |
+            The kernel's own wording, passed through rather than normalized.
+          examples: ["connected", "disconnected", "unknown"]
+        enabled:
+          type: boolean
+        modes:
+          type: array
+          items:
+            type: string
+          examples: [["1920x1080", "1280x720"]]
+        edid:
+          $ref: "#/components/schemas/Edid"
+
+    Edid:
+      type: object
+      additionalProperties: true
+      required: [sha256]
+      description: |
+        Every descriptive field is optional and is omitted rather than guessed
+        when it cannot be parsed reliably. The hash is always present and is
+        useful on its own: it reveals that the physical display attached to a
+        connector changed, even when no descriptive field could be read.
+      properties:
+        sha256:
+          type: string
+          description: SHA-256 of the raw EDID bytes as read from sysfs.
+        manufacturer:
+          type: string
+          description: Three-letter PNP manufacturer ID.
+          examples: ["GSM"]
+        product_code:
+          type: integer
+          description: Manufacturer-assigned product code.
+        product_name:
+          type: string
+          description: Monitor name descriptor, when present.
+          examples: ["LG TV"]
+        serial:
+          type: string
+          description: Serial descriptor or numeric serial, when present.
+
+    ConfiguredBindings:
+      type: object
+      additionalProperties: true
+      required: [tvs, playback_players]
+      description: |
+        The operator-configured relationships the appliance already has in
+        config.yaml, reported separately from physical inventory so the control
+        plane can compare intent against observation.
+
+        Sanitized by construction. LG client keys, the device token, bearer
+        tokens, observability credentials, and local media paths are never
+        included.
+      properties:
+        tvs:
+          type: array
+          items:
+            $ref: "#/components/schemas/ConfiguredTv"
+        playback_players:
+          type: array
+          items:
+            $ref: "#/components/schemas/ConfiguredPlaybackPlayer"
+
+    ConfiguredTv:
+      type: object
+      additionalProperties: true
+      required: [id, name, host, desired_input, desired_volume, driver]
+      properties:
+        id:
+          type: string
+          examples: ["dev-tv"]
+        name:
+          type: string
+          examples: ["Development LG TV"]
+        host:
+          type: string
+          description: LAN address the appliance controls locally.
+          examples: ["192.168.50.21"]
+        desired_input:
+          type: string
+          examples: ["HDMI_1"]
+        desired_volume:
+          type: integer
+          minimum: 0
+          maximum: 100
+        driver:
+          type: string
+          enum: [lg-webos]
+          description: The only implemented television driver.
+
+    ConfiguredPlaybackPlayer:
+      type: object
+      additionalProperties: true
+      required: [id, name]
+      description: |
+        Note the absence of a media field. What a player plays is a local path
+        and is deliberately not reported.
+      properties:
+        id:
+          type: string
+          examples: ["dev-menu"]
+        name:
+          type: string
+          examples: ["Development Menu"]
+        tv_id:
+          type: [string, "null"]
+          description: The configured TV this player is paired with, if any.
+          examples: ["dev-tv"]
+        screen:
+          type: [integer, "null"]
+          description: Operator-supplied display index, mutually exclusive with screen_name.
+        screen_name:
+          type: [string, "null"]
+          description: Operator-supplied connector name, mutually exclusive with screen.
+          examples: ["DP-1"]
+
+    Error:
+      type: object
+      additionalProperties: true
+      required: [error]
+      properties:
+        error:
+          type: string
+          description: Stable machine-readable code.
+          examples: ["enrollment_expired"]
+        message:
+          type: string
+          description: Human-readable detail. Never echoes a credential.
+
+security:
+  - deviceToken: []

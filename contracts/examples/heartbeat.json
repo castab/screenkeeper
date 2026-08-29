@@ -1,0 +1,65 @@
+{
+  "agent": {
+    "architecture": "x86_64",
+    "hostname": "menu-player-01",
+    "kernel": "6.8.0-45-generic",
+    "os": "Linux",
+    "screenkeeper_version": "0.1.0"
+  },
+  "configured_bindings": {
+    "playback_players": [
+      {
+        "id": "dev-menu",
+        "name": "Development Menu",
+        "screen": null,
+        "screen_name": "DP-1",
+        "tv_id": "dev-tv"
+      }
+    ],
+    "tvs": [
+      {
+        "desired_input": "HDMI_1",
+        "desired_volume": 0,
+        "driver": "lg-webos",
+        "host": "192.168.50.21",
+        "id": "dev-tv",
+        "name": "Development LG TV"
+      }
+    ]
+  },
+  "inventory": {
+    "connectors": [
+      {
+        "edid": {
+          "manufacturer": "GSM",
+          "product_code": 30456,
+          "product_name": "LG TV",
+          "serial": "205NTKM1G347",
+          "sha256": "9f2c1a4e8b6d3f570a1c2e4b6d8f0a2c4e6b8d0f2a4c6e8b0d2f4a6c8e0b2d4f"
+        },
+        "enabled": true,
+        "modes": [
+          "1920x1080",
+          "1280x720"
+        ],
+        "name": "DP-1",
+        "status": "connected"
+      },
+      {
+        "enabled": false,
+        "modes": [],
+        "name": "HDMI-A-1",
+        "status": "disconnected"
+      }
+    ],
+    "gpus": [
+      {
+        "card": "card0",
+        "device_id": "0x5912",
+        "driver": "i915",
+        "vendor_id": "0x8086"
+      }
+    ]
+  },
+  "reported_at": "2026-08-29T04:12:00Z"
+}

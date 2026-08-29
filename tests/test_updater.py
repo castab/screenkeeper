@@ -11,6 +11,8 @@ from pathlib import Path
 import pytest
 
 from signage_controller.updater import (
+    DEFAULT_UNITS,
+    OPTIONAL_UNITS,
     HttpError,
     InstallLayout,
     NoReleaseAvailableError,
@@ -536,3 +538,32 @@ def test_restart_services_without_systemd_reports_every_unit(monkeypatch) -> Non
 
     assert failed == ["screenkeeper.service"]
     assert runner.commands == []
+
+
+def test_optional_units_are_try_restarted_so_a_disabled_agent_stays_stopped(monkeypatch) -> None:
+    # `restart` would *start* the control-plane agent on every host that never
+    # enabled it; `try-restart` is a no-op unless the unit is already running.
+    monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/systemctl")
+    runner = FakeRunner()
+
+    restart_services(("screenkeeper.service",), runner=runner)
+
+    assert runner.commands == [
+        ["systemctl", "--user", "restart", "screenkeeper.service"],
+        ["systemctl", "--user", "try-restart", "screenkeeper-agent.service"],
+    ]
+
+
+def test_an_absent_optional_unit_is_not_reported_as_a_failure(monkeypatch) -> None:
+    # Installations predating the agent unit have no such file, and that is fine.
+    monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/systemctl")
+    runner = FakeRunner(fail_on="screenkeeper-agent.service")
+
+    failed = restart_services(("screenkeeper.service",), runner=runner)
+
+    assert failed == []
+
+
+def test_the_default_units_still_exclude_the_agent() -> None:
+    assert DEFAULT_UNITS == ("screenkeeper.service", "screenkeeper-playback.service")
+    assert OPTIONAL_UNITS == ("screenkeeper-agent.service",)

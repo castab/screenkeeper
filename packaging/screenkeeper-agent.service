@@ -1,0 +1,30 @@
+[Unit]
+Description=Screenkeeper control-plane agent
+Documentation=https://github.com/castab/screenkeeper
+# Installed but NOT enabled, like screenkeeper-upgrade.timer. It is useful only
+# once `control_plane:` is configured and `device enroll` has been claimed:
+#   systemctl --user enable --now screenkeeper-agent.service
+#
+# Deliberately independent of screenkeeper.service and
+# screenkeeper-playback.service. Reporting is outbound-only and must never
+# affect TV convergence or mpv playback, and neither of those failing may stop
+# heartbeats. No network-online.target dependency: the agent already treats an
+# unreachable control plane as normal and retries with capped backoff.
+
+[Service]
+Type=simple
+ExecStart=@INSTALL_ROOT@/current/venv/bin/signage-controller \
+    --config @CONFIG_DIR@/config.yaml \
+    --state-dir @STATE_DIR@ \
+    agent run
+# on-failure, not always: with no `control_plane:` section the agent logs and
+# exits 0, and that clean stop should stay stopped rather than restart forever.
+Restart=on-failure
+RestartSec=30
+# Interrupt, matching the other units and the documented Ctrl-C shutdown path.
+KillSignal=SIGINT
+TimeoutStopSec=30
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=default.target

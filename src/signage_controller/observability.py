@@ -16,11 +16,12 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Protocol
 from urllib.error import HTTPError, URLError
-from urllib.request import HTTPRedirectHandler, Request, build_opener
+from urllib.request import Request
 
 import snappy
 
 from .config import LokiConfig, PrometheusConfig
+from .http_client import open_url
 from .tv.base import TelevisionState
 
 
@@ -38,18 +39,10 @@ class ObservabilityError(ValueError):
     """Raised when configured telemetry cannot be initialized safely."""
 
 
-class _NoRedirectHandler(HTTPRedirectHandler):
-    """Reject redirects so bearer tokens and request bodies stay at the configured host."""
-
-    def redirect_request(self, *args: object, **kwargs: object) -> None:
-        return None
-
-
-_NO_REDIRECT_OPENER = build_opener(_NoRedirectHandler())
-
-
 def _open_url(request: Request, timeout: float):
-    return _NO_REDIRECT_OPENER.open(request, timeout=timeout)
+    # Kept as a module-level name rather than calling `open_url` directly: it is
+    # the seam the telemetry tests replace to capture requests without a network.
+    return open_url(request, timeout)
 
 
 class _ApplicationLogFilter(logging.Filter):

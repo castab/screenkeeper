@@ -18,8 +18,13 @@ DEFAULT_PROMETHEUS_JOB = "signage_controller"
 DEFAULT_RESTART_DELAY = 2.0
 DEFAULT_HWDEC = "auto"
 DEFAULT_MPV_BINARY = "mpv"
+DEFAULT_HEARTBEAT_INTERVAL = 30.0
+DEFAULT_CONTROL_PLANE_TIMEOUT = 10.0
 ENVIRONMENT_VARIABLE_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 LOKI_LABEL_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+# Plain HTTP to one of these is a developer talking to a control plane on their
+# own machine, where there is no network for anyone to intercept.
+LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 
 
 class ConfigurationError(ValueError):
@@ -91,6 +96,20 @@ class ObservabilityConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class ControlPlaneConfig:
+    """Optional Screenkeeper Control connectivity, used only by the agent.
+
+    Its absence is the default and keeps the appliance entirely local: TV
+    control and mpv playback never consult this section.
+    """
+
+    base_url: str
+    heartbeat_interval: float = DEFAULT_HEARTBEAT_INTERVAL
+    request_timeout: float = DEFAULT_CONTROL_PLANE_TIMEOUT
+    allow_insecure_http: bool = False
+
+
+@dataclass(frozen=True, slots=True)
 class ApplicationConfig:
     """Controller configuration."""
 
@@ -99,6 +118,7 @@ class ApplicationConfig:
     power_on_delay: float = DEFAULT_POWER_ON_DELAY
     observability: ObservabilityConfig = ObservabilityConfig()
     playback: PlaybackConfig | None = None
+    control_plane: ControlPlaneConfig | None = None
 
     def get_tv(self, tv_id: str) -> TvConfig:
         """Return a TV by ID or provide the valid IDs in the error."""
@@ -159,6 +179,7 @@ def load_config(path: Path) -> ApplicationConfig:
     config_dir = path.resolve().parent
     known_tv_ids = frozenset(tv.id for tv in tvs)
     playback = _parse_playback(raw.get("playback"), config_dir, known_tv_ids)
+    control_plane = _parse_control_plane(raw.get("control_plane"))
 
     return ApplicationConfig(
         tvs=tvs,
@@ -166,6 +187,7 @@ def load_config(path: Path) -> ApplicationConfig:
         power_on_delay=power_on_delay,
         observability=observability,
         playback=playback,
+        control_plane=control_plane,
     )
 
 
@@ -397,6 +419,67 @@ def _parse_prometheus(raw: Any) -> PrometheusConfig | None:
             allow_zero=False,
         ),
     )
+
+
+def _parse_control_plane(raw: Any) -> ControlPlaneConfig | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ConfigurationError("'control_plane' must be a mapping.")
+
+    allow_insecure_http = _parse_bool(
+        raw.get("allow_insecure_http", False), "control_plane.allow_insecure_http"
+    )
+    return ControlPlaneConfig(
+        base_url=_parse_base_url(
+            raw.get("base_url"),
+            "control_plane.base_url",
+            allow_insecure_http=allow_insecure_http,
+        ),
+        heartbeat_interval=_parse_seconds(
+            raw.get("heartbeat_interval", DEFAULT_HEARTBEAT_INTERVAL),
+            "control_plane.heartbeat_interval",
+            allow_zero=False,
+        ),
+        request_timeout=_parse_seconds(
+            raw.get("request_timeout", DEFAULT_CONTROL_PLANE_TIMEOUT),
+            "control_plane.request_timeout",
+            allow_zero=False,
+        ),
+        allow_insecure_http=allow_insecure_http,
+    )
+
+
+def _parse_base_url(value: Any, name: str, *, allow_insecure_http: bool) -> str:
+    """Validate a control-plane base URL, allowing HTTP only where it is safe.
+
+    Production traffic carries a bearer token, so HTTPS is the rule. The two
+    exceptions are explicit and never silent: a loopback host, where there is no
+    network to intercept, and an operator who deliberately set
+    `allow_insecure_http: true`.
+    """
+    if not isinstance(value, str) or not value.strip():
+        raise ConfigurationError(f"'{name}' must be a non-empty HTTPS URL.")
+    value = value.strip().rstrip("/")
+    parsed = urlsplit(value)
+    try:
+        port = parsed.port
+    except ValueError as err:
+        raise ConfigurationError(f"'{name}' must be a valid URL.") from err
+    if not parsed.hostname or (port is not None and not 1 <= port <= 65535):
+        raise ConfigurationError(f"'{name}' must be a valid URL with a host.")
+
+    if parsed.scheme == "https":
+        return value
+    if parsed.scheme == "http":
+        if parsed.hostname in LOOPBACK_HOSTS or allow_insecure_http:
+            return value
+        raise ConfigurationError(
+            f"'{name}' must use HTTPS. Plain HTTP is permitted only for a loopback "
+            "host, or when 'control_plane.allow_insecure_http' is set to true for "
+            "development."
+        )
+    raise ConfigurationError(f"'{name}' must be an HTTPS URL.")
 
 
 def _parse_url(value: Any, name: str) -> str:
