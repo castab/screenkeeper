@@ -9,6 +9,9 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+from opentelemetry import trace
+from opentelemetry.trace import Status, StatusCode
+
 from .config import TvConfig
 from .observability import StatusReporter
 from .state_store import StateStore
@@ -44,22 +47,29 @@ async def _run_command(
     tv_id: str,
     name: str,
     status_reporter: StatusReporter | None,
+    tracer: trace.Tracer | None = None,
 ) -> None:
     """Run one TV command and record its outcome/latency without swallowing errors."""
+    tracer = tracer or trace.get_tracer(__name__)
     start = asyncio.get_running_loop().time()
-    try:
-        await command(value)
-    except Exception:
-        if status_reporter is not None:
-            status_reporter.record_command(
-                tv_id, name, success=False, duration=asyncio.get_running_loop().time() - start
-            )
-        raise
-    else:
-        if status_reporter is not None:
-            status_reporter.record_command(
-                tv_id, name, success=True, duration=asyncio.get_running_loop().time() - start
-            )
+    with tracer.start_as_current_span(
+        "signage_controller.tv_command", attributes={"tv.id": tv_id, "tv.command": name}
+    ) as span:
+        try:
+            await command(value)
+        except Exception as exc:
+            span.record_exception(exc)
+            span.set_status(Status(StatusCode.ERROR))
+            if status_reporter is not None:
+                status_reporter.record_command(
+                    tv_id, name, success=False, duration=asyncio.get_running_loop().time() - start
+                )
+            raise
+        else:
+            if status_reporter is not None:
+                status_reporter.record_command(
+                    tv_id, name, success=True, duration=asyncio.get_running_loop().time() - start
+                )
 
 
 async def converge(
@@ -67,6 +77,7 @@ async def converge(
     config: TvConfig,
     logger: logging.Logger | logging.LoggerAdapter,
     status_reporter: StatusReporter | None = None,
+    tracer: trace.Tracer | None = None,
 ) -> ApplyResult:
     """Read actual state and make only the changes needed for desired state."""
     inputs = await tv.get_inputs()
@@ -95,7 +106,9 @@ async def converge(
             current_input if current_input is not None else "unknown",
             config.desired_input,
         )
-        await _run_command(tv.set_input, config.desired_input, config.id, "set_input", status_reporter)
+        await _run_command(
+            tv.set_input, config.desired_input, config.id, "set_input", status_reporter, tracer
+        )
         if status_reporter is not None:
             status_reporter.update(
                 config.id, state=TelevisionState(current_input=config.desired_input)
@@ -109,7 +122,9 @@ async def converge(
             current_volume if current_volume is not None else "unknown",
             config.desired_volume,
         )
-        await _run_command(tv.set_volume, config.desired_volume, config.id, "set_volume", status_reporter)
+        await _run_command(
+            tv.set_volume, config.desired_volume, config.id, "set_volume", status_reporter, tracer
+        )
         if status_reporter is not None:
             status_reporter.update(config.id, state=TelevisionState(volume=config.desired_volume))
     else:
@@ -138,6 +153,7 @@ class TvManager:
         retry_delays: tuple[float, ...] = RETRY_DELAYS,
         logger: logging.Logger | None = None,
         status_reporter: StatusReporter | None = None,
+        tracer: trace.Tracer | None = None,
     ) -> None:
         self.config = config
         self.television = television
@@ -147,6 +163,7 @@ class TvManager:
         self.retry_delays = retry_delays
         self.logger = logging.LoggerAdapter(logger or LOGGER, {"tv_id": config.id})
         self.status_reporter = status_reporter
+        self.tracer = tracer or trace.get_tracer(__name__)
         self._state_changed = asyncio.Event()
         self._is_on: bool | None = None
         self._reconcile_after: float | None = None
@@ -254,6 +271,7 @@ class TvManager:
             self.config,
             self.logger,
             self.status_reporter,
+            self.tracer,
         )
         if announce_if_unchanged and not result.changed:
             self.logger.info("%s: desired state verified; monitoring", self.config.id)
@@ -362,6 +380,7 @@ async def run_all(
     factory: TelevisionFactory,
     stop_event: asyncio.Event,
     status_reporter: StatusReporter | None = None,
+    tracer: trace.Tracer | None = None,
 ) -> None:
     """Run an independent management task for every configured television."""
     managers = [
@@ -372,6 +391,7 @@ async def run_all(
             reconcile_interval=reconcile_interval,
             power_on_delay=power_on_delay,
             status_reporter=status_reporter,
+            tracer=tracer,
         )
         for tv_config in configs
     ]

@@ -38,6 +38,16 @@ services:
       SCREENKEEPER_ADMIN_TOKEN: ${SCREENKEEPER_ADMIN_TOKEN:?set your own admin token in .env -- never commit it}
       SCREENKEEPER_HEARTBEAT_INTERVAL_SECONDS: "30"
       SCREENKEEPER_ONLINE_MULTIPLIER: "3"
+      # To try OTel Java agent tracing locally, uncomment these and point
+      # OTEL_EXPORTER_OTLP_ENDPOINT at an OTLP receiver reachable from this
+      # container. This compose file has no Alloy of its own -- see
+      # docs/architecture/observability.md "Local development". On Linux,
+      # run deploy/alloy/dev/compose.yaml's Alloy on the same Docker network;
+      # on Windows/Mac, host.docker.internal reaches a host-run receiver.
+      # JAVA_TOOL_OPTIONS: "-javaagent:/opt/opentelemetry-javaagent.jar"
+      # OTEL_EXPORTER_OTLP_ENDPOINT: "http://host.docker.internal:4318"
+      # OTEL_SERVICE_NAME: "screenkeeper-control"
+      # OTEL_RESOURCE_ATTRIBUTES: "deployment.environment=dev"
     ports:
       - "8080:8080"
 

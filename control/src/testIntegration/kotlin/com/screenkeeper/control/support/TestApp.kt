@@ -16,6 +16,8 @@ import com.screenkeeper.control.persistence.repository.PlayerReportRepository
 import com.screenkeeper.control.persistence.repository.PlayerRepository
 import io.micrometer.prometheusmetrics.PrometheusConfig
 import io.micrometer.prometheusmetrics.PrometheusMeterRegistry
+import io.opentelemetry.api.GlobalOpenTelemetry
+import io.opentelemetry.api.trace.Tracer
 import org.http4k.core.HttpHandler
 import org.jdbi.v3.core.Jdbi
 import java.time.Clock
@@ -29,6 +31,7 @@ class TestApp(
     heartbeatIntervalSeconds: Long = 30,
     onlineMultiplier: Double = 3.0,
     enrollmentTtlMinutes: Long = 15,
+    tracer: Tracer = GlobalOpenTelemetry.getTracer("screenkeeper-control-test"),
 ) {
     val jdbi: Jdbi = TestDatabase.jdbi
 
@@ -59,7 +62,7 @@ class TestApp(
 
     val enrollmentService = EnrollmentService(
         jdbi, config, clock, enrollmentRepository, playerRepository, playerCredentialRepository,
-        locationRepository, organizationRepository,
+        locationRepository, organizationRepository, tracer,
     )
     val heartbeatService = HeartbeatService(jdbi, clock, playerRepository, playerReportRepository)
     val organizationService = OrganizationService(jdbi, organizationRepository)

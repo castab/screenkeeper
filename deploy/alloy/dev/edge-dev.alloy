@@ -51,9 +51,32 @@ otelcol.receiver.otlp "default" {
 
 	output {
 		metrics = [otelcol.exporter.prometheus.default.input]
+		traces  = [otelcol.exporter.otlp.dev.input]
 	}
 }
 
 otelcol.exporter.prometheus "default" {
 	forward_to = [prometheus.remote_write.dev.receiver]
+}
+
+// No auth, no identity enrichment -- this is the dev stack, matching
+// prometheus.remote_write "dev" above. See ../edge.alloy for the real thing.
+otelcol.exporter.otlp "dev" {
+	client {
+		endpoint = "tempo:4317"
+		tls {
+			insecure = true
+		}
+	}
+}
+
+loki.source.journal "screenkeeper" {
+	forward_to = [loki.write.dev.receiver]
+	labels     = {component = "loki.source.journal"}
+}
+
+loki.write "dev" {
+	endpoint {
+		url = "http://loki:3100/loki/api/v1/push"
+	}
 }

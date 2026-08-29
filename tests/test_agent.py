@@ -6,6 +6,10 @@ import random
 from pathlib import Path
 
 import pytest
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+from opentelemetry.trace import StatusCode
 
 from signage_controller.config import (
     ApplicationConfig,
@@ -104,6 +108,13 @@ def _agent(
     return agent, store
 
 
+def _tracer_with_exporter() -> tuple:
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    return provider.get_tracer("test"), exporter
+
+
 async def _run_until(agent: HeartbeatAgent, transport: FakeTransport, calls: int) -> None:
     """Run the agent until it has made `calls` requests, then stop it cleanly."""
     stop_event = asyncio.Event()
@@ -117,6 +128,37 @@ async def _run_until(agent: HeartbeatAgent, transport: FakeTransport, calls: int
     finally:
         stop_event.set()
         await asyncio.wait_for(task, timeout=5)
+
+
+async def test_successful_heartbeat_emits_a_span_without_error_status(tmp_path: Path) -> None:
+    transport = FakeTransport([ACCEPTED])
+    tracer, exporter = _tracer_with_exporter()
+    agent, _ = _agent(tmp_path, transport, tracer=tracer)
+
+    await _run_until(agent, transport, 1)
+
+    spans = [
+        s for s in exporter.get_finished_spans() if s.name == "signage_controller.control_plane.heartbeat"
+    ]
+    assert len(spans) == 1
+    # OTel convention: successful spans stay UNSET; only failures get ERROR.
+    assert spans[0].status.status_code == StatusCode.UNSET
+    assert spans[0].attributes["heartbeat.result"] == "success"
+
+
+async def test_auth_rejected_heartbeat_emits_an_error_span(tmp_path: Path) -> None:
+    transport = FakeTransport([(401, {"error": "unknown_device"})])
+    tracer, exporter = _tracer_with_exporter()
+    agent, _ = _agent(tmp_path, transport, tracer=tracer)
+
+    await _run_until(agent, transport, 1)
+
+    spans = [
+        s for s in exporter.get_finished_spans() if s.name == "signage_controller.control_plane.heartbeat"
+    ]
+    assert len(spans) == 1
+    assert spans[0].status.status_code == StatusCode.ERROR
+    assert spans[0].attributes["heartbeat.result"] == "auth_rejected"
 
 
 async def test_heartbeat_uses_the_authenticated_v1_player_path(tmp_path: Path) -> None:

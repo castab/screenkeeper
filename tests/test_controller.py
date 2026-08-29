@@ -4,6 +4,10 @@ import asyncio
 import logging
 
 import pytest
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+from opentelemetry.trace import StatusCode
 
 from signage_controller.config import TvConfig
 from signage_controller.controller import DesiredInputError, TvManager, converge
@@ -11,6 +15,14 @@ from signage_controller.state_store import StateStore
 from signage_controller.tv.base import TelevisionState
 
 from .conftest import FakeTelevision, unavailable
+
+
+def _tracer_with_exporter() -> tuple:
+    """A local TracerProvider + InMemorySpanExporter, never touching global state."""
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    return provider.get_tracer("test"), exporter
 
 
 CONFIG = TvConfig(
@@ -74,6 +86,43 @@ async def test_converge_reports_observed_and_changed_status() -> None:
         ("dev-tv", "set_input", True),
         ("dev-tv", "set_volume", True),
     ]
+
+
+@pytest.mark.asyncio
+async def test_converge_emits_a_span_per_command() -> None:
+    tv = FakeTelevision(current_input="HDMI_2", volume=12)
+    tracer, exporter = _tracer_with_exporter()
+
+    await converge(tv, CONFIG, LOGGER, tracer=tracer)
+
+    spans = exporter.get_finished_spans()
+    assert [span.name for span in spans] == [
+        "signage_controller.tv_command",
+        "signage_controller.tv_command",
+    ]
+    # OTel convention: successful spans stay UNSET; only failures get ERROR.
+    assert all(span.status.status_code == StatusCode.UNSET for span in spans)
+    assert {span.attributes["tv.command"] for span in spans} == {"set_input", "set_volume"}
+    assert all(span.attributes["tv.id"] == "dev-tv" for span in spans)
+
+
+class _FailingTelevision(FakeTelevision):
+    async def set_input(self, input_id: str) -> None:
+        raise RuntimeError("boom")
+
+
+@pytest.mark.asyncio
+async def test_a_failing_command_still_produces_an_error_span_and_still_raises() -> None:
+    tv = _FailingTelevision(current_input="HDMI_2", volume=0)
+    tracer, exporter = _tracer_with_exporter()
+
+    with pytest.raises(RuntimeError, match="boom"):
+        await converge(tv, CONFIG, LOGGER, tracer=tracer)
+
+    spans = exporter.get_finished_spans()
+    assert len(spans) == 1
+    assert spans[0].name == "signage_controller.tv_command"
+    assert spans[0].status.status_code == StatusCode.ERROR
 
 
 @pytest.mark.asyncio

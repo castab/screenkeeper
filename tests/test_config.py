@@ -120,6 +120,87 @@ tvs:
     assert config.metrics.port == 9464
 
 
+def test_load_config_parses_optional_tracing(tmp_path) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        """tracing:
+  enabled: true
+  endpoint: http://127.0.0.1:4318
+tvs:
+  - id: left
+    name: Left Menu
+    host: 192.168.50.21
+    desired_input: HDMI_1
+    desired_volume: 0
+""",
+        encoding="utf-8",
+    )
+
+    config = load_config(path)
+
+    assert config.tracing is not None
+    assert config.tracing.enabled is True
+    assert config.tracing.endpoint == "http://127.0.0.1:4318"
+
+
+def test_load_config_tracing_absent_by_default(tmp_path) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        """tvs:
+  - id: left
+    name: Left Menu
+    host: 192.168.50.21
+    desired_input: HDMI_1
+    desired_volume: 0
+""",
+        encoding="utf-8",
+    )
+
+    config = load_config(path)
+
+    assert config.tracing is None
+
+
+def test_load_config_tracing_block_defaults_enabled_true(tmp_path) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        """tracing: {}
+tvs:
+  - id: left
+    name: Left Menu
+    host: 192.168.50.21
+    desired_input: HDMI_1
+    desired_volume: 0
+""",
+        encoding="utf-8",
+    )
+
+    config = load_config(path)
+
+    assert config.tracing is not None
+    assert config.tracing.enabled is True
+    assert config.tracing.endpoint == "http://127.0.0.1:4318"
+
+
+def test_load_config_rejects_empty_tracing_endpoint(tmp_path) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        """tracing:
+  endpoint: ""
+tvs:
+  - id: left
+    name: Left Menu
+    host: 192.168.50.21
+    desired_input: HDMI_1
+    desired_volume: 0
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigurationError, match="tracing.endpoint"):
+        load_config(path)
+
+
 def test_load_config_rejects_out_of_range_metrics_port(tmp_path) -> None:
     path = tmp_path / "config.yaml"
     path.write_text(

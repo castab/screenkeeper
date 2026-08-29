@@ -11,6 +11,7 @@ kotlinxDatetime = "0.6.1"
 hikaricp = "6.2.1"
 logback = "1.5.12"
 micrometer = "1.14.4"
+opentelemetry = "1.51.0"
 
 [libraries]
 kotlin-reflect = { module = "org.jetbrains.kotlin:kotlin-reflect", version.ref = "kotlin" }
@@ -36,6 +37,13 @@ logback-classic = { module = "ch.qos.logback:logback-classic", version.ref = "lo
 
 micrometer-core = { module = "io.micrometer:micrometer-core", version.ref = "micrometer" }
 micrometer-registry-prometheus = { module = "io.micrometer:micrometer-registry-prometheus", version.ref = "micrometer" }
+
+# Compile-time only: manual spans call GlobalOpenTelemetry.getTracer(...), which
+# is a true no-op until the OTel Java agent (-javaagent, attached at deploy
+# time -- see control/Dockerfile) installs a real SDK. No app code depends on
+# the SDK itself; opentelemetry-sdk-testing (below) is test-only.
+opentelemetry-api = { module = "io.opentelemetry:opentelemetry-api", version.ref = "opentelemetry" }
+opentelemetry-sdk-testing = { module = "io.opentelemetry:opentelemetry-sdk-testing", version.ref = "opentelemetry" }
 
 # Reserved for a future outbound integration. Not yet a build.gradle.kts dependency.
 okhttp = { module = "com.squareup.okhttp3:okhttp", version.ref = "okhttp" }

@@ -21,6 +21,9 @@ import contextlib
 import logging
 import random
 
+from opentelemetry import trace
+from opentelemetry.trace import Status, StatusCode
+
 from ..config import ApplicationConfig, ControlPlaneConfig
 from ..inventory.drm import DEFAULT_SYSFS_DRM, collect_inventory
 from ..observability import ControlPlaneStatusReporter
@@ -76,6 +79,7 @@ class HeartbeatAgent:
         jitter_fraction: float = JITTER_FRACTION,
         rng: random.Random | None = None,
         status_reporter: ControlPlaneStatusReporter | None = None,
+        tracer: trace.Tracer | None = None,
     ) -> None:
         self.config = config
         self.control_plane = control_plane
@@ -85,6 +89,7 @@ class HeartbeatAgent:
         self.logger = logger or LOGGER
         self._sysfs_root = sysfs_root
         self._status_reporter = status_reporter
+        self._tracer = tracer or trace.get_tracer(__name__)
         self._backoff_delays = backoff_delays
         self._auth_backoff_seconds = auth_backoff_seconds
         self._jitter_fraction = jitter_fraction
@@ -109,34 +114,48 @@ class HeartbeatAgent:
 
     async def _beat_once(self) -> float:
         """Send one heartbeat and return how long to wait before the next."""
-        try:
-            report = await asyncio.to_thread(self._collect)
-            await asyncio.to_thread(
-                self.client.send_heartbeat,
-                self.identity.player_id,
-                self.identity.device_token,
-                report,
-            )
-        except ControlPlaneAuthError as err:
-            return self._on_auth_failure(err)
-        except ControlPlaneUnavailableError as err:
-            return self._on_unavailable(err)
-        except ControlPlaneError as err:
-            # A 4xx that will not fix itself. Back off hard rather than hammering.
-            self._reachable = False
-            self._record_heartbeat(success=False)
-            self.logger.error("Control plane rejected this heartbeat: %s", err)
-            self._failure_streak += 1
-            return self._jittered(_backoff_delay(self._failure_streak, self._backoff_delays))
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            # An unexpected bug here must not take the agent process down.
-            self._record_heartbeat(success=False)
-            self.logger.exception("Unexpected control-plane agent failure")
-            self._failure_streak += 1
-            return self._jittered(_backoff_delay(self._failure_streak, self._backoff_delays))
-        return self._on_success()
+        with self._tracer.start_as_current_span("signage_controller.control_plane.heartbeat") as span:
+            try:
+                report = await asyncio.to_thread(self._collect)
+                await asyncio.to_thread(
+                    self.client.send_heartbeat,
+                    self.identity.player_id,
+                    self.identity.device_token,
+                    report,
+                )
+            except ControlPlaneAuthError as err:
+                span.set_attribute("heartbeat.result", "auth_rejected")
+                span.record_exception(err)
+                span.set_status(Status(StatusCode.ERROR))
+                return self._on_auth_failure(err)
+            except ControlPlaneUnavailableError as err:
+                span.set_attribute("heartbeat.result", "unavailable")
+                span.record_exception(err)
+                span.set_status(Status(StatusCode.ERROR))
+                return self._on_unavailable(err)
+            except ControlPlaneError as err:
+                # A 4xx that will not fix itself. Back off hard rather than hammering.
+                span.set_attribute("heartbeat.result", "rejected")
+                span.record_exception(err)
+                span.set_status(Status(StatusCode.ERROR))
+                self._reachable = False
+                self._record_heartbeat(success=False)
+                self.logger.error("Control plane rejected this heartbeat: %s", err)
+                self._failure_streak += 1
+                return self._jittered(_backoff_delay(self._failure_streak, self._backoff_delays))
+            except asyncio.CancelledError:
+                raise
+            except Exception as err:
+                # An unexpected bug here must not take the agent process down.
+                span.set_attribute("heartbeat.result", "error")
+                span.record_exception(err)
+                span.set_status(Status(StatusCode.ERROR))
+                self._record_heartbeat(success=False)
+                self.logger.exception("Unexpected control-plane agent failure")
+                self._failure_streak += 1
+                return self._jittered(_backoff_delay(self._failure_streak, self._backoff_delays))
+            span.set_attribute("heartbeat.result", "success")
+            return self._on_success()
 
     def _collect(self) -> dict:
         """Gather a fresh snapshot. Runs off the event loop: it reads sysfs."""
@@ -212,11 +231,12 @@ async def run_agent(
     *,
     client: ControlPlaneClient | None = None,
     status_reporter: ControlPlaneStatusReporter | None = None,
+    tracer: trace.Tracer | None = None,
 ) -> None:
     """Run one heartbeat agent for this appliance."""
     resolved = client or ControlPlaneClient(
         control_plane.base_url, timeout=control_plane.request_timeout
     )
     await HeartbeatAgent(
-        config, control_plane, resolved, store, identity, status_reporter=status_reporter
+        config, control_plane, resolved, store, identity, status_reporter=status_reporter, tracer=tracer
     ).run(stop_event)

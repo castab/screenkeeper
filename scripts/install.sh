@@ -300,11 +300,15 @@ UNIT
         ( umask 077
           cat > /etc/alloy/screenkeeper.env <<'ENVFILE'
 # Alloy's own environment. Screenkeeper never reads this file or its values.
-# Fill in real values before Alloy can remote_write telemetry anywhere -- these
-# placeholders let Alloy start and scrape locally while exporting nothing.
+# Fill in real values before Alloy can export telemetry anywhere -- these
+# placeholders let Alloy start and scrape/tail locally while exporting
+# nothing. Bearer tokens, not basic auth: see deploy/alloy/README.md.
 METRICS_REMOTE_WRITE_URL=
-METRICS_REMOTE_WRITE_USERNAME=
-METRICS_REMOTE_WRITE_PASSWORD=
+METRICS_REMOTE_WRITE_TOKEN=
+TRACES_OTLP_ENDPOINT=
+TRACES_OTLP_TOKEN=
+LOGS_REMOTE_WRITE_URL=
+LOGS_REMOTE_WRITE_TOKEN=
 SCREENKEEPER_ENVIRONMENT=production
 ENVFILE
         )

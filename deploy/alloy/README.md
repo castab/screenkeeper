@@ -20,14 +20,21 @@ boundary.
 
 | File | For | What it does |
 |---|---|---|
-| `edge.alloy` | a Screenkeeper Edge (player) host | scrapes local `/metrics`, host metrics, OTLP receiver, remote_write |
+| `edge.alloy` | a Screenkeeper Edge (player) host | scrapes local `/metrics`, host metrics, OTLP receiver (metrics + traces), journald tailing, remote_write/OTLP export/Loki push |
 | `control-plane.alloy` | a Screenkeeper Control (central server) host | same shape, scrapes the control server's local metrics port instead |
 | `render-identity-env.sh` | edge hosts only | reads `device.json`, writes an env file for player/location labels |
-| `dev/compose.yaml` | local development | Alloy + Prometheus + Grafana, no production credentials needed |
+| `dev/compose.yaml` | local development | Alloy + Prometheus + Loki + Tempo + Grafana, no production credentials needed |
 
 These normally run on **different hosts** in production (a player is edge
 infrastructure; the control server is central infrastructure), which is why
 there are two separate files rather than one parameterized one.
+
+`control-plane.alloy`'s journald tailing is included for parity with
+`edge.alloy` but is only meaningful today for Alloy's own logs: `control/`
+deploys via Docker and has no systemd unit of its own to filter for (see
+`control/README.md`). It becomes useful automatically if/when a host-native
+control deployment exists -- no config change needed then, since the filter
+already matches any `screenkeeper*.service` unit.
 
 ## Automated setup (edge hosts, apt-based distros)
 
@@ -68,11 +75,18 @@ Alloy reads these from **its own** environment, via
 (add this line with `systemctl edit alloy` if the packaged unit doesn't
 already include it). Screenkeeper never sees this file or its values.
 
+All three channels use a bearer token, not basic auth: these are headless,
+unattended appliances, and a single rotatable token per channel is simpler to
+provision and rotate across a fleet than a username/password pair per host.
+
 ```bash
 # /etc/alloy/screenkeeper.env -- 0600, root-owned, never committed anywhere
 METRICS_REMOTE_WRITE_URL=https://prometheus.example.com/api/v1/write
-METRICS_REMOTE_WRITE_USERNAME=your-username
-METRICS_REMOTE_WRITE_PASSWORD=your-password
+METRICS_REMOTE_WRITE_TOKEN=your-metrics-token
+TRACES_OTLP_ENDPOINT=otlp.example.com:4317
+TRACES_OTLP_TOKEN=your-traces-token
+LOGS_REMOTE_WRITE_URL=https://loki.example.com/loki/api/v1/push
+LOGS_REMOTE_WRITE_TOKEN=your-logs-token
 SCREENKEEPER_ENVIRONMENT=production
 ```
 
@@ -128,9 +142,29 @@ recovery).
 
 ## Local development
 
-`dev/compose.yaml` runs Alloy, a local Prometheus, and Grafana in containers
-so a developer can see the full pipeline without any production credentials.
-The Screenkeeper player itself is never containerized (see the repository's
-`AGENTS.md`); it keeps running natively on the host, and the dev Alloy config
-reaches it via `host.docker.internal`. See `dev/compose.yaml`'s own comments
-for usage.
+`dev/compose.yaml` runs Alloy, a local Prometheus, Loki, Tempo, and Grafana in
+containers so a developer can see the full metrics/logs/traces pipeline
+without any production credentials. The Screenkeeper player itself is never
+containerized (see the repository's `AGENTS.md`); it keeps running natively
+on the host, and the dev Alloy config reaches it via `host.docker.internal`.
+See `dev/compose.yaml`'s own comments for usage.
+
+The journald bind mount in that compose file only has anything to tail on a
+native Linux dev host -- Docker Desktop (Windows/Mac) has no host journald,
+so the log pipeline starts cleanly but tails nothing there, which is expected.
+Metrics and traces work identically on every platform, verified via:
+
+```bash
+# Emit a test span through the local OTLP endpoint (any process with
+# tracing.enabled: true works; this is the minimal standalone check):
+python -c "
+from signage_controller.config import TracingConfig
+from signage_controller.tracing import configure_tracing
+handle = configure_tracing('smoke-test', TracingConfig(enabled=True))
+with handle.tracer.start_as_current_span('smoke.span'):
+    pass
+handle.shutdown()
+"
+# Then check Grafana's Tempo datasource (Explore -> Tempo -> Search), or:
+curl -s http://127.0.0.1:3200/api/search | jq
+```
