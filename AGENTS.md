@@ -3,7 +3,7 @@
 ## Project Purpose
 
 `signage-controller` is a small Linux appliance component — Screenkeeper Edge —
-that manages three independent concerns for digital signage:
+that manages four independent concerns for digital signage:
 
 1. LG webOS television control over the LAN (Phase 1): converges each
    configured TV to a desired HDMI input and absolute volume. One `run`
@@ -16,8 +16,12 @@ that manages three independent concerns for digital signage:
    permanent identity, lets an administrator claim it with a short pairing
    code, and reports observed display hardware and configured bindings to an
    optional control plane. One `agent run` process, outbound-only.
+4. Content distribution and synchronization (Phase 4): reconciles desired
+   assignments from Screenkeeper Control into a verified local cache. One
+   `content run` process owns this runtime; playback resolves selected cached
+   media independently and continues through WAN or storage outages.
 
-All three are configuration-driven from the same YAML file and are
+All four are configuration-driven from the same YAML file and are
 intentionally kept architecturally independent — see Behavioral Invariants
 below.
 
@@ -128,6 +132,8 @@ Prefer injecting a collaborator over monkeypatching: `opener`, `runner`,
 - `control_plane/enrollment.py`: the operator-initiated pairing-code workflow.
 - `control_plane/agent.py`: the heartbeat loop, mirroring `PlayerSupervisor`'s
   supervision shape.
+- `content/`: manifest parsing, verified cache/state persistence, HTTPS
+  downloading, reconciliation, status reporting, and playback resolution.
 - `tv/base.py`: narrow `Television` abstraction used by controller tests.
 - `tv/lg_webos.py`: the only layer that depends on `aiowebostv`.
 - `controller.py`: desired-state convergence, retry lifecycle, delayed
@@ -193,16 +199,18 @@ releases.
   session those units depend on is still part of the deferred work, which is
   why `screenkeeper-playback.service` binds to `graphical-session.target`
   instead of provisioning one.
-- Control-plane connectivity (Phase 3) is implemented and authorized: permanent
+- Control-plane connectivity (Phase 3) and content synchronization (Phase 4)
+  are implemented and authorized: permanent
   device identity, pairing-code enrollment, Linux hardware/display inventory,
   heartbeat reporting, the `agent run` runtime, the shared contract under
-  `contracts/`, and `screenkeeper-agent.service`. Keep it a small slice. The
-  following remain unauthorized without a further explicit grant: remote
-  content distribution, object storage, playlists, schedules, deployment
-  manifests, remote desired-configuration application, NATS/JetStream, remote
-  shell, arbitrary server-issued commands, remote Linux administration, and
-  additional television drivers. Leave extension points, not unused
-  abstraction layers.
+  `contracts/`, `screenkeeper-agent.service`, S3-compatible object storage,
+  immutable asset revisions, per-player assignments, signed URL manifests,
+  verified local caching, and `screenkeeper-content.service`. The following
+  remain unauthorized without a further explicit grant: cache garbage
+  collection, object deletion, playlists, schedules, multipart administration,
+  NATS/JetStream, remote shell, arbitrary server-issued commands, remote Linux
+  administration, and additional television drivers. Leave extension points,
+  not unused abstraction layers.
 - The control plane is optional and must stay optional. Absence of a
   `control_plane:` section preserves current behavior exactly, and none of
   `run`, `playback run`, `pair`, `status`, `inputs`, `apply`, or
@@ -280,6 +288,10 @@ releases.
   the agent on every host that never enabled it. `agent run` exits 0 when no
   `control_plane:` section exists, so a manually started unit stops cleanly
   instead of restart-looping.
+- `screenkeeper-content.service` also ships installed but disabled, uses
+  `content.lock`, has no graphical-session or network-online dependency, and
+  is refreshed with `try-restart`. Content synchronization is a peer runtime;
+  outages or failures must never stop an already selected cached asset.
 - `__version__` in `src/signage_controller/__init__.py` is the single source of
   truth for the version. `pyproject.toml` reads it dynamically. Do not
   reintroduce a hardcoded `version =` in `pyproject.toml`, and do not let a

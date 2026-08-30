@@ -2,6 +2,8 @@ package com.screenkeeper.control.http.routes
 
 import com.screenkeeper.control.application.enrollment.EnrollmentService
 import com.screenkeeper.control.application.heartbeat.HeartbeatService
+import com.screenkeeper.control.application.content.AssetService
+import com.screenkeeper.control.application.content.ContentService
 import com.screenkeeper.control.application.registry.LocationService
 import com.screenkeeper.control.application.registry.OrganizationService
 import com.screenkeeper.control.application.registry.PlayerRegistryService
@@ -37,6 +39,8 @@ object Routes {
         organizationService: OrganizationService,
         locationService: LocationService,
         playerRegistryService: PlayerRegistryService,
+        assetService: AssetService,
+        contentService: ContentService,
         enrollmentRepository: EnrollmentRepository,
         playerRepository: PlayerRepository,
         playerCredentialRepository: PlayerCredentialRepository,
@@ -66,11 +70,29 @@ object Routes {
                 },
             ).then(HeartbeatRoutes.submit(heartbeatService))
 
+        val playerCredentialFilter = PlayerCredentialFilter(
+            resolvePlayer = { id ->
+                jdbi.withHandle<com.screenkeeper.control.domain.Player?, RuntimeException> { handle ->
+                    playerRepository.findById(handle, id)
+                }
+            },
+            resolveCredential = { id ->
+                jdbi.withHandle<com.screenkeeper.control.domain.PlayerCredential?, RuntimeException> { handle ->
+                    playerCredentialRepository.findByPlayerId(handle, id)
+                }
+            },
+        )
+        val contentManifestRoute = "/api/v1/players/{player_id}/content" bind Method.GET to
+            playerCredentialFilter.then(ContentRoutes.manifest(contentService))
+        val contentStatusRoute = "/api/v1/players/{player_id}/content-status" bind Method.PUT to
+            playerCredentialFilter.then(ContentRoutes.status(contentService))
+
         val adminRoutes = routes(
             AdminOrganizationRoutes.build(organizationService),
             AdminLocationRoutes.build(locationService),
             AdminEnrollmentRoutes.build(enrollmentService, clock),
             AdminPlayerRoutes.build(playerRegistryService),
+            AdminContentRoutes.build(assetService, contentService),
         ).withFilter(AdminAuthFilter(adminToken))
 
         val app = routes(
@@ -78,6 +100,8 @@ object Routes {
             enrollmentCreateRoute,
             enrollmentPollRoute,
             heartbeatRoute,
+            contentManifestRoute,
+            contentStatusRoute,
             adminRoutes,
         )
 

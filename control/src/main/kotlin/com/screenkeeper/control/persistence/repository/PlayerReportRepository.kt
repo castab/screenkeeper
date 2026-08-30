@@ -35,4 +35,20 @@ class PlayerReportRepository {
             .mapTo<PlayerReport>()
             .findFirst()
             .orElse(null)
+
+    fun hasPlaybackPlayer(handle: Handle, playerId: UUID, playbackPlayerId: String): Boolean =
+        handle.createQuery(
+            """
+            SELECT EXISTS (
+                SELECT 1
+                FROM player_reports p,
+                     jsonb_array_elements(COALESCE(p.report->'configured_bindings'->'playback_players', '[]'::jsonb)) item
+                WHERE p.player_id = :playerId AND item->>'id' = :playbackPlayerId
+            )
+            """.trimIndent(),
+        )
+            .bind("playerId", playerId)
+            .bind("playbackPlayerId", playbackPlayerId)
+            .mapTo<Boolean>()
+            .one()
 }

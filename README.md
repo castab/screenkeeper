@@ -1,6 +1,6 @@
 # Signage Controller
 
-Screenkeeper Edge manages three independent concerns for digital signage from
+Screenkeeper Edge manages four independent concerns for digital signage from
 one YAML configuration file:
 
 1. **LG webOS television state over the LAN** (Phase 1): connects directly to
@@ -14,19 +14,22 @@ one YAML configuration file:
    appliance a permanent identity, lets an administrator claim it with a short
    pairing code, and reports the displays and configured relationships it
    observes to a control plane. See "Control Plane" below.
+4. **Content synchronization** (Phase 4, optional): reconciles control-plane
+   assignments into a verified local cache and lets playback switch only after
+   a complete, checksum-valid download. See "Content Distribution" below.
 
 These subsystems are intentionally decoupled. A TV being powered off does not
 stop its player from looping; a player being unavailable does not stop TV
-convergence; a control plane being unreachable stops neither. When staff turns
-a TV back on, Screenkeeper switches it to the correct HDMI input and the video
-is already there.
+convergence; content synchronization and reporting are peer runtimes that stop
+neither. When staff turns a TV back on, Screenkeeper switches it to the correct
+HDMI input and the video is already there.
 
 The configuration supports multiple TVs and multiple players, but start by
 commissioning one TV and one player completely before adding more.
 
-**Signage keeps running without the Internet.** TV control is local to the LAN,
-mpv plays local files, and the control plane is optional. A WAN outage stops
-reporting and nothing else.
+**Signage keeps running without the Internet.** TV control is local to the LAN
+and mpv always plays local files. A WAN, control-plane, or object-storage outage
+prevents new assignments from arriving but does not interrupt the active video.
 
 ## Requirements
 
@@ -264,7 +267,7 @@ is the periodic correctness fallback after the initial reconciliation.
 `power_on_delay` is a non-negative number of seconds. It defaults to `15` and
 is used after each successful connection and an observed off-to-on state change.
 
-The optional `playback:`, `metrics:`, and `control_plane:` sections are
+The optional `playback:`, `metrics:`, `control_plane:`, and `content:` sections are
 documented in their own sections below. Omitting any of them preserves the
 behavior described above exactly.
 
@@ -461,17 +464,15 @@ actually plugged into it? It distinguishes three things:
 ```text
 IDENTITY        Who am I?                              implemented
 OBSERVED STATE  What hardware do I currently see?      implemented
-DESIRED STATE   What does the control plane want?      a later phase
+DESIRED CONTENT Which immutable video should play?     implemented
 ```
-
-Only the first two exist today. The appliance reports; it is not yet told what
-to do.
 
 ### What it does not change
 
 - **LG TV control stays local.** The appliance talks to each TV over the LAN,
   exactly as before. The control plane is never in that path.
-- **mpv stays local.** Players loop local files with no network dependency.
+- **mpv stays local.** Players loop verified local files with no network
+  dependency. Signed URLs are consumed only by the content runtime.
 - **Signage survives a WAN failure.** A control-plane outage stops heartbeats
   and nothing else. TVs keep converging, video keeps looping.
 - **The player initiates everything.** There is no inbound connection, no
@@ -609,7 +610,8 @@ player bound to a connector that no longer exists.
 
 The configured half is assembled from an allowlist, so it never carries LG
 client keys, the device token, metrics configuration, or local media paths.
-What a player *plays* is not reported.
+Content synchronization status is reported separately from heartbeats and
+contains immutable revision IDs, never paths or signed URLs.
 
 A heartbeat is a snapshot of the present, not an event log.
 
@@ -651,6 +653,55 @@ independently even though they live in one repository. Within `/api/v1`,
 clients tolerate unknown response fields and evolution is additive — edge and
 control releases never need to match versions.
 
+## Content Distribution
+
+Optional. Add `content:` only after configuring and enrolling with a control
+plane:
+
+```yaml
+content:
+  enabled: true
+  reconcile_interval: 300
+  download_timeout: 3600
+  # cache_dir: /var/lib/signage-controller/media
+```
+
+Presence defaults `enabled` to `true`. The cache defaults to
+`<state-dir>/media`; an override must be absolute and outside `/etc`. Omitting
+the block preserves local-only playback exactly.
+
+The content runtime fetches assignment metadata from Screenkeeper Control and
+downloads media bytes directly from an S3-compatible store through short-lived
+HTTPS URLs. It does not persist those URLs. Objects are deduplicated and named
+only by lowercase SHA-256, downloaded into a unique `.part` file, flushed and
+fsynced, checked for exact byte size and digest, and atomically installed. Only
+then does the selected mapping change. Original filenames never become local
+or object-storage paths.
+
+```bash
+signage-controller content status
+signage-controller content status --json
+signage-controller content sync
+signage-controller content run
+```
+
+`status` is local-only. `sync` performs one reconciliation under
+`content.lock` and exits nonzero when the desired revision could not be made
+available, without replacing valid active media. `run` repeats the same core
+with jittered capped backoff and heavier authentication-failure backoff.
+
+Verified remote content wins over a player's YAML `media` path. That YAML path
+remains the fallback: clearing an assignment returns to it when the file still
+exists; otherwise Screenkeeper retains the last verified remote selection.
+Playback gracefully restarts mpv only when the resolved local path changes.
+Selected and actually-playing revisions remain distinct, so an mpv failure is
+not mistaken for successful playback.
+
+Cached objects are retained indefinitely in this MVP. A bad manifest, expired
+URL, interrupted transfer, checksum mismatch, restart, reporting failure, or
+WAN/storage outage leaves the selected mapping untouched. Existing signage
+therefore continues looping while a replacement is unavailable.
+
 ## Observability
 
 Screenkeeper produces telemetry locally; it never transports it anywhere.
@@ -663,9 +714,8 @@ architecture, the host-agent setup, and the "Screenkeeper knows X, does not
 know Y" boundary. `scripts/install.sh --install-alloy` automates installing
 and configuring Alloy on an edge host (see `deploy/alloy/README.md`); remote-
 write credentials are always left for an operator to fill in by hand.
-Commissioning commands (`pair`, `status`, `inputs`, `apply`) publish nothing;
-only the three long-running commands do, and only when `metrics.enabled` is
-true.
+Commissioning and content commands publish no metrics; only `run`, `playback
+run`, and `agent run` do, and only when `metrics.enabled` is true.
 
 Set `metrics:` in `config.yaml`:
 
@@ -838,11 +888,13 @@ playback run`), and summarized in the `WARNING` above on an abnormal exit.
 
 ## Local State
 
-Two files live in the state directory, both holding credentials:
+Credential state and content state live in the state directory:
 
 ```text
 $XDG_STATE_HOME/signage-controller/state.json    LG TV pairing keys
 $XDG_STATE_HOME/signage-controller/device.json   device identity and enrollment
+$XDG_STATE_HOME/signage-controller/content/      desired/selected/playing state
+$XDG_STATE_HOME/signage-controller/media/        verified hash-named media
 ```
 
 When `XDG_STATE_HOME` is unset, the default is
@@ -864,20 +916,17 @@ as an LG client key: never printed, never logged, and absent from
 appliance's identity — the host becomes a new installation and has to enroll
 again.
 
-Runtime lock files also live here — `controller.lock`, `playback.lock`, and
-`agent.lock` — one per independent runtime, which is what lets all three run at
-the same time.
+Runtime lock files also live here — `controller.lock`, `playback.lock`,
+`agent.lock`, and `content.lock` — one per independent runtime, which is what
+lets all four run at the same time.
 
 ## Deployment Shape
 
-Screenkeeper is not containerized. The TV controller, the mpv players, and the
-optional control-plane agent run as host-native processes on the same Linux
-machine — `signage-controller run`, `signage-controller playback run`, and
-`signage-controller agent run` — reading the same `config.yaml` and sharing the
-same state directory through independent locks. mpv needs direct access to that
-host's graphical session, and the appliance only makes outbound connections
-(never listening for inbound traffic), so there is nothing a split or
-containerized deployment would buy here.
+Screenkeeper Edge is not containerized. The TV controller, mpv players,
+control-plane agent, and content reconciler run as host-native peer processes
+on the same Linux machine, reading the same `config.yaml` and sharing the state
+directory through independent locks. mpv needs direct access to the graphical
+session, and the appliance only makes outbound connections.
 
 All are ordinary foreground commands, and all are supervised by systemd user
 units on an installed host:
@@ -887,6 +936,7 @@ units on an installed host:
 | `screenkeeper.service` | `run` (TV control) | `default.target`, at boot with linger |
 | `screenkeeper-playback.service` | `playback run` (mpv) | `graphical-session.target` |
 | `screenkeeper-agent.service` | `agent run` (reporting) | Installed but **not enabled** |
+| `screenkeeper-content.service` | `content run` (synchronization) | Installed but **not enabled** |
 | `screenkeeper-upgrade.timer` | `upgrade` | Installed but **not enabled** |
 
 The playback unit is deliberately bound to `graphical-session.target` rather
@@ -895,26 +945,26 @@ session up automatically — autologin and kiosk desktop configuration — is pa
 of the deferred physical-display work under "Real-Hardware Validation" below.
 Until then, playback starts when the signage user's graphical session does.
 
-The agent unit ships installed but disabled, because it is useless until a
-`control_plane:` section exists and the player has been claimed. Enable it once
-enrollment succeeds:
+The agent and content units ship installed but disabled, because they are
+useless until the corresponding configuration exists and the player has been
+claimed. Enable them once enrollment succeeds:
 
 ```bash
 systemctl --user enable --now screenkeeper-agent.service
+systemctl --user enable --now screenkeeper-content.service
 ```
 
 Existing installations are unaffected by its arrival. `signage-controller
-upgrade` refreshes it with `try-restart`, which does nothing unless the unit is
-already running, so an upgrade never starts an agent nobody enabled. If it is
-started without a `control_plane:` section it logs that fact and exits 0 rather
-than restart-looping.
+upgrade` refreshes both with `try-restart`, which does nothing unless a unit is
+already running, so an upgrade never starts a runtime nobody enabled. If either
+is started without its required configuration it logs that fact and exits 0
+rather than restart-looping.
 
 The units are independent by design, matching the invariant that a TV being off
 must never stop playback and vice versa — and that a control plane being
-unreachable stops neither. No unit `Requires` another, and neither
-`screenkeeper.service` nor `screenkeeper-agent.service` declares a
-`network-online.target` dependency: both already treat an unreachable peer as
-normal and retry with capped backoff.
+unreachable stops neither. No unit `Requires` another. The controller, agent,
+and content units have no `network-online.target` dependency because they
+already treat an unreachable peer as normal and retry with capped backoff.
 
 ## Updating
 
@@ -1086,9 +1136,14 @@ The suite uses no real TV. It covers:
   transient failure not killing the agent, backoff progression and jitter
   bounds, recovery resetting failure state, an auth rejection backing off
   heavily without touching identity, and clean shutdown
+- Content synchronization: optional configuration, strict manifest parsing,
+  URL-free persisted metadata, cache hits, shared-object deduplication,
+  streamed size/SHA-256 verification, atomic installation, invisible `.part`
+  files, outage-safe active selection, traversal resistance, playing markers,
+  and local-first playback resolution
 - The shared contract: the committed `contracts/examples/*.json` matching what
-  the client produces and consumes, plus one end-to-end enrollment and
-  heartbeat over real HTTP against a loopback server
+  the client produces and consumes, plus end-to-end enrollment, heartbeat, and
+  content request coverage over real HTTP against a loopback server
 
 None of the automated coverage above requires `mpv`, an X server, Wayland, a
 GPU, a physical display, a real LG TV, or a real control plane.

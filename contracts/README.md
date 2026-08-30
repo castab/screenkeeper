@@ -33,9 +33,13 @@ client, so an operator configures `https://screenkeeper.example.com`, not
 | Request an enrollment | `POST /api/v1/enrollments` | none (carries the device token in the body) |
 | Poll an enrollment | `GET /api/v1/enrollments/{enrollment_id}` | `Authorization: Bearer <device_token>` |
 | Report observed state | `POST /api/v1/players/{player_id}/heartbeat` | `Authorization: Bearer <device_token>` |
+| Fetch desired content | `GET /api/v1/players/{player_id}/content` | `Authorization: Bearer <device_token>` |
+| Report content status | `PUT /api/v1/players/{player_id}/content-status` | `Authorization: Bearer <device_token>` |
+| Create/inspect assets and revisions | `/api/v1/admin/assets...` | `Authorization: Bearer <admin_token>` |
+| Assign/clear player content | `/api/v1/admin/players/{id}/content/{local_id}` | `Authorization: Bearer <admin_token>` |
 
-All three are initiated by the appliance. **The control plane never calls the
-appliance.** There is no callback URL, no inbound port, and no webhook: a
+All device operations are initiated by the appliance. **The control plane
+never calls the appliance.** There is no callback URL, no inbound port, and no webhook: a
 Screenkeeper host requires no inbound Internet connectivity at all.
 
 ## Compatibility
@@ -116,6 +120,14 @@ implementation:
 | `enrollment-created.json` | `POST /api/v1/enrollments` 201 response |
 | `enrollment-claimed.json` | `GET /api/v1/enrollments/{id}` response after a claim |
 | `heartbeat.json` | `POST /api/v1/players/{id}/heartbeat` request body |
+| `content-manifest.json` | `GET /api/v1/players/{id}/content` response |
+| `content-status.json` | `PUT /api/v1/players/{id}/content-status` request body |
 
 The pending-poll response is small enough to live inline in `openapi.yaml`:
 `{"status": "pending"}`.
+
+Content manifests identify immutable revisions by ID, revision number, size,
+MIME type, and lowercase SHA-256. Their signed `download_url` is deliberately
+short-lived: the edge ignores unknown fields and persists only the sanitized
+metadata, never the URL or its query string. Content status is a latest
+snapshot separate from the heartbeat, not an event stream.

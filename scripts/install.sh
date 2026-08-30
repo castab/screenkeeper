@@ -340,6 +340,9 @@ Next steps:
        sudo -u $SERVICE_USER XDG_RUNTIME_DIR=/run/user/$(id -u "$SERVICE_USER") \\
          systemctl --user enable --now screenkeeper.service
   4. Playback starts with the graphical session (see README, "mpv Playback").
+  5. After enrollment and content configuration, optionally enable:
+       systemctl --user enable --now screenkeeper-agent.service
+       systemctl --user enable --now screenkeeper-content.service
 
 Later updates need no root:
   signage-controller upgrade --check

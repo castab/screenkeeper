@@ -2,6 +2,8 @@ package com.screenkeeper.control.support
 
 import com.screenkeeper.control.application.enrollment.EnrollmentService
 import com.screenkeeper.control.application.heartbeat.HeartbeatService
+import com.screenkeeper.control.application.content.AssetService
+import com.screenkeeper.control.application.content.ContentService
 import com.screenkeeper.control.application.registry.LocationService
 import com.screenkeeper.control.application.registry.OrganizationService
 import com.screenkeeper.control.application.registry.PlayerRegistryService
@@ -9,11 +11,14 @@ import com.screenkeeper.control.config.AppConfig
 import com.screenkeeper.control.http.routes.Routes
 import com.screenkeeper.control.persistence.migration.Migrator
 import com.screenkeeper.control.persistence.repository.EnrollmentRepository
+import com.screenkeeper.control.persistence.repository.ContentRepository
+import com.screenkeeper.control.persistence.repository.MediaAssetRepository
 import com.screenkeeper.control.persistence.repository.LocationRepository
 import com.screenkeeper.control.persistence.repository.OrganizationRepository
 import com.screenkeeper.control.persistence.repository.PlayerCredentialRepository
 import com.screenkeeper.control.persistence.repository.PlayerReportRepository
 import com.screenkeeper.control.persistence.repository.PlayerRepository
+import com.screenkeeper.control.storage.ObjectStore
 import io.micrometer.prometheusmetrics.PrometheusConfig
 import io.micrometer.prometheusmetrics.PrometheusMeterRegistry
 import io.opentelemetry.api.GlobalOpenTelemetry
@@ -32,6 +37,7 @@ class TestApp(
     onlineMultiplier: Double = 3.0,
     enrollmentTtlMinutes: Long = 15,
     tracer: Tracer = GlobalOpenTelemetry.getTracer("screenkeeper-control-test"),
+    objectStore: ObjectStore? = null,
 ) {
     val jdbi: Jdbi = TestDatabase.jdbi
 
@@ -41,6 +47,8 @@ class TestApp(
     val playerCredentialRepository = PlayerCredentialRepository()
     val enrollmentRepository = EnrollmentRepository()
     val playerReportRepository = PlayerReportRepository()
+    val mediaAssetRepository = MediaAssetRepository()
+    val contentRepository = ContentRepository()
 
     val config = AppConfig(
         host = "0.0.0.0",
@@ -56,6 +64,7 @@ class TestApp(
         metricsEnabled = true,
         metricsHost = "127.0.0.1",
         metricsPort = 0,
+        objectStorage = null,
     )
 
     val meterRegistry = PrometheusMeterRegistry(PrometheusConfig.DEFAULT)
@@ -68,7 +77,13 @@ class TestApp(
     val organizationService = OrganizationService(jdbi, organizationRepository)
     val locationService = LocationService(jdbi, locationRepository, organizationRepository)
     val playerRegistryService = PlayerRegistryService(
-        jdbi, clock, config, playerRepository, locationRepository, organizationRepository, playerReportRepository,
+        jdbi, clock, config, playerRepository, locationRepository, organizationRepository,
+        playerReportRepository, contentRepository,
+    )
+    val assetService = AssetService(jdbi, clock, mediaAssetRepository, objectStore, 3600)
+    val contentService = ContentService(
+        jdbi, clock, playerRepository, playerReportRepository, mediaAssetRepository,
+        contentRepository, objectStore, 3600,
     )
 
     val handler: HttpHandler = Routes.build(
@@ -82,6 +97,8 @@ class TestApp(
         organizationService = organizationService,
         locationService = locationService,
         playerRegistryService = playerRegistryService,
+        assetService = assetService,
+        contentService = contentService,
         enrollmentRepository = enrollmentRepository,
         playerRepository = playerRepository,
         playerCredentialRepository = playerCredentialRepository,

@@ -51,8 +51,8 @@ DEFAULT_REPOSITORY = "castab/screenkeeper"
 DEFAULT_INSTALL_ROOT = Path("/opt/screenkeeper")
 DEFAULT_KEEP_VERSIONS = 3
 DEFAULT_UNITS = ("screenkeeper.service", "screenkeeper-playback.service")
-# Refreshed only if already running: the agent unit ships installed but disabled.
-OPTIONAL_UNITS = ("screenkeeper-agent.service",)
+# Refreshed only if already running: both optional units ship disabled.
+OPTIONAL_UNITS = ("screenkeeper-agent.service", "screenkeeper-content.service")
 GITHUB_API_BASE = "https://api.github.com"
 CHECKSUM_ASSET_NAME = "SHA256SUMS"
 REQUEST_TIMEOUT = 60.0
@@ -527,8 +527,8 @@ def restart_services(
 
     `optional_units` get `try-restart` rather than `restart`, which is a no-op
     when the unit is inactive. `restart` would *start* a unit that ships
-    installed-but-disabled, so an upgrade would silently turn on a control-plane
-    agent nobody enabled.
+    installed-but-disabled, so an upgrade would silently turn on an optional
+    control-plane runtime nobody enabled.
     """
     if shutil.which("systemctl") is None:
         LOGGER.info("systemctl is not available; restart the signage processes manually.")

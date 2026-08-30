@@ -74,4 +74,5 @@ data class PlayerDetailDto(
     @SerialName("last_seen_at") val lastSeenAt: Instant? = null,
     @SerialName("screenkeeper_version") val screenkeeperVersion: String? = null,
     @SerialName("latest_report") val latestReport: JsonElement? = null,
+    @SerialName("content_status") val contentStatus: JsonElement? = null,
 )

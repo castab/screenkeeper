@@ -60,6 +60,7 @@ dependencies {
 
     implementation(libs.kotlinx.serialization.json)
     implementation(libs.kotlinx.datetime)
+    implementation(libs.kotlinx.coroutines.core)
 
     implementation(libs.jdbi.core)
     implementation(libs.jdbi.postgres)
@@ -77,6 +78,8 @@ dependencies {
     implementation(libs.micrometer.registry.prometheus)
 
     implementation(libs.opentelemetry.api)
+    implementation(libs.aws.sdk.s3)
+    implementation(libs.aws.smithy.http.okhttp)
 
     testImplementation(platform(libs.kotest.bom))
     testImplementation(libs.kotest.runner.junit5)

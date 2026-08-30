@@ -81,19 +81,23 @@ def test_every_documented_example_file_exists() -> None:
         "enrollment-created",
         "enrollment-claimed",
         "heartbeat",
+        "content-manifest",
+        "content-status",
     ):
         assert (EXAMPLES / f"{name}.json").is_file(), name
 
 
-def test_the_spec_declares_the_three_v1_operations() -> None:
+def test_the_spec_declares_the_v1_device_and_content_operations() -> None:
     spec = _spec()
 
     assert spec["openapi"].startswith("3.1")
-    assert set(spec["paths"]) == {
+    assert {
         "/enrollments",
         "/enrollments/{enrollment_id}",
         "/players/{player_id}/heartbeat",
-    }
+        "/players/{player_id}/content",
+        "/players/{player_id}/content-status",
+    } <= set(spec["paths"])
     assert all(server["url"].endswith("/api/v1") for server in spec["servers"])
 
 

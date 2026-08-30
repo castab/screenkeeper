@@ -7,7 +7,8 @@ Edge player at the repository root. It implements the server side of the
 shared contract at `contracts/openapi.yaml`: appliance enrollment via a
 short pairing code, heartbeat reporting of observed display hardware and
 configured bindings, and a small admin API for organizations, locations,
-and claiming enrollments. See the root `AGENTS.md` for the monorepo
+claiming enrollments, immutable video assets, and per-player content
+assignments. See the root `AGENTS.md` for the monorepo
 boundary and `contracts/README.md` for the compatibility rules.
 
 Read `README.md` in this directory before changing configuration, routes,
@@ -29,11 +30,10 @@ or the database schema.
   an externally provided Postgres (env vars `SCREENKEEPER_TEST_DATABASE_*`)
   -- **no Testcontainers**, deliberately, for CI reliability. See
   `README.md` for exact commands.
-- **OkHttp is reserved, not wired in.** Do not add a speculative outbound
-  HTTP client. If a real outbound integration is added later, use OkHttp
-  with explicit timeouts, a bounded connection pool, and MockWebServer
-  tests -- never for calling the local database or replacing direct
-  application-service calls in tests.
+- The AWS Kotlin S3 client with its OkHttp engine is the only object-storage
+  implementation in this phase. Keep vendor-neutral application code behind
+  the narrow `ObjectStore` boundary (`head`, `presignPut`, `presignGet`);
+  never proxy media bytes through this server.
 - Kotlin DSL for Gradle, a version catalog (`gradle/libs.versions.toml`),
   and explicit dependency versions -- no dynamic/`+` versions.
 
@@ -82,12 +82,12 @@ or the database schema.
 
 ## Scope invariants
 
-Do not implement, even as a stub or placeholder table: Asset, object
-storage, Deployment, Playlist, Schedule, Manifest, download URLs, NATS,
-JetStream, or any remote command/shell/arbitrary-subprocess mechanism. This
-product is a desired-state system, not a remote-access tool. These are
-explicitly deferred to a later phase -- see
-`docs/architecture/control-plane.md`.
+Immutable video assets, S3-compatible object storage, signed upload/download
+URLs, per-player assignments, manifests, and latest content-status snapshots
+are implemented. Do not add object deletion, media proxying, cache GC,
+playlists, schedules, multipart administration, NATS, JetStream, or any remote
+command/shell/arbitrary-subprocess mechanism. This product is a desired-state
+system, not a remote-access tool. See `docs/architecture/control-plane.md`.
 
 ## Containerization
 

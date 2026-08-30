@@ -45,6 +45,7 @@ object AdminPlayerRoutes {
                     lastSeenAt = detail.summary.player.lastSeenAt?.toKotlinInstant(),
                     screenkeeperVersion = detail.summary.player.screenkeeperVersion,
                     latestReport = detail.latestReportJson?.let { KotlinxJson.parseToJsonElement(it) },
+                    contentStatus = detail.latestContentStatusJson?.let { KotlinxJson.parseToJsonElement(it) },
                 ),
                 Response(Status.OK),
             )

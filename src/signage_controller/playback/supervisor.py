@@ -18,6 +18,7 @@ from opentelemetry import trace
 from opentelemetry.trace import Status, StatusCode
 
 from ..config import PlaybackConfig, PlayerConfig
+from ..content.resolver import MediaResolver, ResolvedMedia
 from ..observability import PlayerStatusReporter
 from .mpv import MpvPlayer, ProcessLauncher, default_launcher
 
@@ -64,6 +65,7 @@ class PlayerSupervisor:
         healthy_reset_seconds: float = HEALTHY_RESET_SECONDS,
         status_reporter: PlayerStatusReporter | None = None,
         tracer: trace.Tracer | None = None,
+        media_resolver: MediaResolver | None = None,
     ) -> None:
         self.player = player
         self.playback = playback
@@ -76,6 +78,7 @@ class PlayerSupervisor:
         self.status_reporter = status_reporter
         self.tracer = tracer or trace.get_tracer(__name__)
         self._current_player: MpvPlayer | None = None
+        self.media_resolver = media_resolver or MediaResolver()
 
     def _report_healthy(self, *, healthy: bool) -> None:
         if self.status_reporter is not None:
@@ -83,6 +86,9 @@ class PlayerSupervisor:
 
     async def run(self, stop_event: asyncio.Event) -> None:
         """Run until stopped, waiting on missing media and restarting on crash."""
+        # Clear a marker left by an ungraceful prior process before claiming
+        # that this new supervisor has actually started anything.
+        self.media_resolver.record_playing(self.player.id, None)
         try:
             await self._run_loop(stop_event, failure_streak=0, media_missing_logged=False)
         finally:
@@ -91,18 +97,20 @@ class PlayerSupervisor:
             if self._current_player is not None:
                 self._current_player.terminate_now()
                 self._current_player = None
+            self.media_resolver.record_playing(self.player.id, None)
 
     async def _run_loop(
         self, stop_event: asyncio.Event, *, failure_streak: int, media_missing_logged: bool
     ) -> None:
         while not stop_event.is_set():
             try:
-                if not self.player.media.exists():
+                resolved = self.media_resolver.resolve(self.player)
+                if not resolved.path.exists():
                     if not media_missing_logged:
                         self.logger.info(
                             "%s: media unavailable; waiting for %s",
                             self.player.id,
-                            self.player.media,
+                            resolved.path,
                         )
                         media_missing_logged = True
                         self._report_healthy(healthy=False)
@@ -117,6 +125,7 @@ class PlayerSupervisor:
                     self.playback,
                     self.socket_path,
                     self.logger,
+                    media_path=resolved.path,
                     launcher=self._launcher,
                 )
                 start_time = asyncio.get_running_loop().time()
@@ -135,11 +144,13 @@ class PlayerSupervisor:
                 self._current_player = mpv_player
                 self.logger.info("%s: playback healthy", self.player.id)
                 self._report_healthy(healthy=True)
+                self.media_resolver.record_playing(self.player.id, resolved.asset_revision_id)
 
                 wait_task = asyncio.create_task(mpv_player.wait())
                 stop_task = asyncio.create_task(stop_event.wait())
+                change_task = asyncio.create_task(self._wait_for_media_change(stop_event, resolved))
                 done, pending = await asyncio.wait(
-                    {wait_task, stop_task}, return_when=asyncio.FIRST_COMPLETED
+                    {wait_task, stop_task, change_task}, return_when=asyncio.FIRST_COMPLETED
                 )
                 for task in pending:
                     task.cancel()
@@ -148,10 +159,24 @@ class PlayerSupervisor:
                 if stop_task in done:
                     await mpv_player.stop()
                     self._current_player = None
+                    self.media_resolver.record_playing(self.player.id, None)
                     self._report_healthy(healthy=False)
                     return
 
+                if change_task in done and change_task.result() is not None:
+                    replacement = change_task.result()
+                    self.logger.info(
+                        "%s: verified media changed to %s; restarting playback",
+                        self.player.id,
+                        replacement.path,
+                    )
+                    await mpv_player.stop()
+                    self._current_player = None
+                    self.media_resolver.record_playing(self.player.id, None)
+                    continue
+
                 self._current_player = None
+                self.media_resolver.record_playing(self.player.id, None)
                 returncode = wait_task.result()
                 elapsed = asyncio.get_running_loop().time() - start_time
                 if elapsed >= self._healthy_reset_seconds:
@@ -201,6 +226,16 @@ class PlayerSupervisor:
         with contextlib.suppress(TimeoutError):
             await asyncio.wait_for(stop_event.wait(), timeout=delay)
 
+    async def _wait_for_media_change(
+        self, stop_event: asyncio.Event, current: ResolvedMedia
+    ) -> ResolvedMedia | None:
+        while not stop_event.is_set():
+            await self._wait_or_stop(stop_event, self._media_poll_interval)
+            resolved = self.media_resolver.resolve(self.player)
+            if resolved != current and resolved.path.exists():
+                return resolved
+        return None
+
 
 async def run_playback(
     playback: PlaybackConfig,
@@ -210,6 +245,7 @@ async def run_playback(
     launcher: ProcessLauncher = default_launcher,
     status_reporter: PlayerStatusReporter | None = None,
     tracer: trace.Tracer | None = None,
+    media_resolver: MediaResolver | None = None,
 ) -> None:
     """Run an independent supervisor task for every configured player."""
     if not playback.players:
@@ -224,6 +260,7 @@ async def run_playback(
             launcher=launcher,
             status_reporter=status_reporter,
             tracer=tracer,
+            media_resolver=media_resolver,
         )
         for player in playback.players
     ]

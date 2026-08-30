@@ -192,6 +192,28 @@ class ControlPlaneClient:
         if not 200 <= status < 300:
             raise self._classify(status, body, "heartbeat rejected")
 
+    def fetch_content(self, player_id: str, token: str):
+        """Fetch and validate this appliance's desired content manifest."""
+        from ..content.models import ContentManifest
+
+        status, body = self._send(
+            "GET", f"/players/{quote(player_id, safe='')}/content", token=token
+        )
+        if status != 200:
+            raise self._classify(status, body, "content manifest rejected")
+        return ContentManifest.from_dict(body)
+
+    def send_content_status(self, player_id: str, token: str, report: dict[str, Any]) -> None:
+        """Replace the latest content synchronization snapshot."""
+        status, body = self._send(
+            "PUT",
+            f"/players/{quote(player_id, safe='')}/content-status",
+            payload=report,
+            token=token,
+        )
+        if not 200 <= status < 300:
+            raise self._classify(status, body, "content status rejected")
+
     def _send(
         self,
         method: str,

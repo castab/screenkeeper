@@ -19,6 +19,8 @@ DEFAULT_HWDEC = "auto"
 DEFAULT_MPV_BINARY = "mpv"
 DEFAULT_HEARTBEAT_INTERVAL = 30.0
 DEFAULT_CONTROL_PLANE_TIMEOUT = 10.0
+DEFAULT_CONTENT_RECONCILE_INTERVAL = 300.0
+DEFAULT_CONTENT_DOWNLOAD_TIMEOUT = 3600.0
 # Plain HTTP to one of these is a developer talking to a control plane on their
 # own machine, where there is no network for anyone to intercept.
 LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
@@ -107,6 +109,16 @@ class ControlPlaneConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class ContentConfig:
+    """Optional remotely managed content synchronization."""
+
+    enabled: bool = True
+    reconcile_interval: float = DEFAULT_CONTENT_RECONCILE_INTERVAL
+    download_timeout: float = DEFAULT_CONTENT_DOWNLOAD_TIMEOUT
+    cache_dir: Path | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class ApplicationConfig:
     """Controller configuration."""
 
@@ -117,6 +129,7 @@ class ApplicationConfig:
     tracing: TracingConfig | None = None
     playback: PlaybackConfig | None = None
     control_plane: ControlPlaneConfig | None = None
+    content: ContentConfig | None = None
 
     def get_tv(self, tv_id: str) -> TvConfig:
         """Return a TV by ID or provide the valid IDs in the error."""
@@ -179,6 +192,7 @@ def load_config(path: Path) -> ApplicationConfig:
     known_tv_ids = frozenset(tv.id for tv in tvs)
     playback = _parse_playback(raw.get("playback"), config_dir, known_tv_ids)
     control_plane = _parse_control_plane(raw.get("control_plane"))
+    content = _parse_content(raw.get("content"))
 
     return ApplicationConfig(
         tvs=tvs,
@@ -188,6 +202,7 @@ def load_config(path: Path) -> ApplicationConfig:
         tracing=tracing,
         playback=playback,
         control_plane=control_plane,
+        content=content,
     )
 
 
@@ -415,6 +430,40 @@ def _parse_control_plane(raw: Any) -> ControlPlaneConfig | None:
     )
 
 
+def _parse_content(raw: Any) -> ContentConfig | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ConfigurationError("'content' must be a mapping.")
+    enabled = _parse_bool(raw.get("enabled", True), "content.enabled")
+    cache_dir_raw = raw.get("cache_dir")
+    cache_dir: Path | None = None
+    if cache_dir_raw is not None:
+        if not isinstance(cache_dir_raw, str) or not cache_dir_raw.strip():
+            raise ConfigurationError("'content.cache_dir' must be an absolute path.")
+        cache_dir = Path(cache_dir_raw.strip())
+        if not cache_dir.is_absolute():
+            raise ConfigurationError("'content.cache_dir' must be an absolute path.")
+        try:
+            cache_dir.relative_to(Path("/etc"))
+        except ValueError:
+            pass
+        else:
+            raise ConfigurationError("'content.cache_dir' must not be underneath /etc.")
+    return ContentConfig(
+        enabled=enabled,
+        reconcile_interval=_parse_seconds(
+            raw.get("reconcile_interval", DEFAULT_CONTENT_RECONCILE_INTERVAL),
+            "content.reconcile_interval",
+            allow_zero=False,
+        ),
+        download_timeout=_parse_seconds(
+            raw.get("download_timeout", DEFAULT_CONTENT_DOWNLOAD_TIMEOUT),
+            "content.download_timeout",
+            allow_zero=False,
+        ),
+        cache_dir=cache_dir,
+    )
 def _parse_base_url(value: Any, name: str, *, allow_insecure_http: bool) -> str:
     """Validate a control-plane base URL, allowing HTTP only where it is safe.
 

@@ -16,6 +16,7 @@ data class AppConfig(
     val metricsEnabled: Boolean,
     val metricsHost: String,
     val metricsPort: Int,
+    val objectStorage: ObjectStorageConfig?,
 ) {
     companion object {
         // Not an env var: this is a protocol constant advertised to every
@@ -26,6 +27,29 @@ data class AppConfig(
             fun required(name: String): String =
                 env[name]?.takeIf { it.isNotBlank() }
                     ?: throw ConfigError("$name is required and has no default; set it before starting screenkeeper-control")
+
+            val s3Names = listOf(
+                "S3_ENDPOINT", "S3_BUCKET", "S3_ACCESS_KEY_ID", "S3_SECRET_ACCESS_KEY", "S3_REGION",
+            )
+            val configuredS3Names = s3Names.filter { !env[it].isNullOrBlank() }
+            val objectStorage = if (configuredS3Names.isEmpty()) {
+                null
+            } else {
+                val missing = s3Names - configuredS3Names.toSet()
+                if (missing.isNotEmpty()) {
+                    throw ConfigError("Incomplete S3 configuration; missing ${missing.joinToString(", ")}")
+                }
+                ObjectStorageConfig(
+                    endpoint = env.getValue("S3_ENDPOINT").trim(),
+                    bucket = env.getValue("S3_BUCKET").trim(),
+                    accessKeyId = env.getValue("S3_ACCESS_KEY_ID").trim(),
+                    secretAccessKey = env.getValue("S3_SECRET_ACCESS_KEY").trim(),
+                    region = env.getValue("S3_REGION").trim(),
+                    pathStyle = env["S3_PATH_STYLE"]?.toBooleanStrictOrNull() ?: false,
+                    uploadUrlTtlSeconds = env["S3_UPLOAD_URL_TTL_SECONDS"]?.toLongOrNull()?.takeIf { it > 0 } ?: 3600L,
+                    downloadUrlTtlSeconds = env["S3_DOWNLOAD_URL_TTL_SECONDS"]?.toLongOrNull()?.takeIf { it > 0 } ?: 3600L,
+                )
+            }
 
             return AppConfig(
                 host = env["SCREENKEEPER_CONTROL_HOST"]?.takeIf { it.isNotBlank() } ?: "0.0.0.0",
@@ -44,6 +68,7 @@ data class AppConfig(
                 metricsEnabled = env["SCREENKEEPER_CONTROL_METRICS_ENABLED"]?.toBooleanStrictOrNull() ?: true,
                 metricsHost = env["SCREENKEEPER_CONTROL_METRICS_HOST"]?.takeIf { it.isNotBlank() } ?: "127.0.0.1",
                 metricsPort = env["SCREENKEEPER_CONTROL_METRICS_PORT"]?.toIntOrNull() ?: 9464,
+                objectStorage = objectStorage,
             )
         }
     }
@@ -52,5 +77,23 @@ data class AppConfig(
         "AppConfig(host=$host, port=$port, databaseUrl=$databaseUrl, databaseUser=$databaseUser, " +
             "heartbeatIntervalSeconds=$heartbeatIntervalSeconds, onlineMultiplier=$onlineMultiplier, " +
             "enrollmentTtlMinutes=$enrollmentTtlMinutes, enrollmentReapAfterMinutes=$enrollmentReapAfterMinutes, " +
-            "metricsEnabled=$metricsEnabled, metricsHost=$metricsHost, metricsPort=$metricsPort)"
+            "metricsEnabled=$metricsEnabled, metricsHost=$metricsHost, metricsPort=$metricsPort, " +
+            "objectStorage=${objectStorage?.redacted()})"
+}
+
+data class ObjectStorageConfig(
+    val endpoint: String,
+    val bucket: String,
+    val accessKeyId: String,
+    val secretAccessKey: String,
+    val region: String,
+    val pathStyle: Boolean,
+    val uploadUrlTtlSeconds: Long,
+    val downloadUrlTtlSeconds: Long,
+) {
+    fun redacted(): String =
+        "ObjectStorageConfig(endpoint=$endpoint, bucket=$bucket, region=$region, pathStyle=$pathStyle, " +
+            "uploadUrlTtlSeconds=$uploadUrlTtlSeconds, downloadUrlTtlSeconds=$downloadUrlTtlSeconds)"
+
+    override fun toString(): String = redacted()
 }

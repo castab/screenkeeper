@@ -37,6 +37,7 @@ def build_mpv_argv(
     player: PlayerConfig,
     playback: PlaybackConfig,
     socket_path: Path,
+    media_path: Path | None = None,
 ) -> list[str]:
     """Build the mpv argv for one player. Pure: no filesystem/subprocess/env access."""
     argv: list[str] = [playback.mpv_binary, "--no-config"]
@@ -60,7 +61,7 @@ def build_mpv_argv(
         argv.append(f"--fs-screen-name={player.screen_name}")
     argv.append(f"--input-ipc-server={socket_path}")
     argv.append("--")
-    argv.append(str(player.media))
+    argv.append(str(media_path or player.media))
     return argv
 
 
@@ -103,6 +104,7 @@ class MpvPlayer:
         playback: PlaybackConfig,
         socket_path: Path,
         logger: logging.Logger | logging.LoggerAdapter,
+        media_path: Path | None = None,
         *,
         launcher: ProcessLauncher = default_launcher,
         ipc_quit_timeout: float = DEFAULT_IPC_QUIT_TIMEOUT,
@@ -113,6 +115,7 @@ class MpvPlayer:
         self.playback = playback
         self.socket_path = socket_path
         self.logger = logger
+        self.media_path = media_path or player.media
         self._launcher = launcher
         self._ipc_quit_timeout = ipc_quit_timeout
         self._ipc_exit_wait = ipc_exit_wait
@@ -132,8 +135,8 @@ class MpvPlayer:
     async def start(self) -> None:
         """Launch mpv for this player."""
         _remove_stale_socket(self.socket_path)
-        argv = build_mpv_argv(self.player, self.playback, self.socket_path)
-        self.logger.info("%s: starting mpv for %s", self.player.id, self.player.media)
+        argv = build_mpv_argv(self.player, self.playback, self.socket_path, self.media_path)
+        self.logger.info("%s: starting mpv for %s", self.player.id, self.media_path)
         self._process = await self._launcher(argv)
         if self._process.stdout is not None:
             self._output_task = asyncio.create_task(self._drain_output())

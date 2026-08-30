@@ -551,6 +551,7 @@ def test_optional_units_are_try_restarted_so_a_disabled_agent_stays_stopped(monk
     assert runner.commands == [
         ["systemctl", "--user", "restart", "screenkeeper.service"],
         ["systemctl", "--user", "try-restart", "screenkeeper-agent.service"],
+        ["systemctl", "--user", "try-restart", "screenkeeper-content.service"],
     ]
 
 
@@ -566,4 +567,4 @@ def test_an_absent_optional_unit_is_not_reported_as_a_failure(monkeypatch) -> No
 
 def test_the_default_units_still_exclude_the_agent() -> None:
     assert DEFAULT_UNITS == ("screenkeeper.service", "screenkeeper-playback.service")
-    assert OPTIONAL_UNITS == ("screenkeeper-agent.service",)
+    assert OPTIONAL_UNITS == ("screenkeeper-agent.service", "screenkeeper-content.service")

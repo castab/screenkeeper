@@ -1,0 +1,19 @@
+{
+  "revision": 18,
+  "players": [
+    {
+      "player_id": "dev-menu",
+      "content": {
+        "kind": "asset",
+        "asset_id": "019254c1-aaaa-7a13-8d4f-6e7f8a9b0c1d",
+        "asset_revision_id": "019254c1-bbbb-7a13-8d4f-6e7f8a9b0c1d",
+        "revision": 3,
+        "original_filename": "menu-v2.mp4",
+        "content_type": "video/mp4",
+        "byte_size": 12,
+        "sha256": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+        "download_url": "https://bucket.example/assets/9f/9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08?signature=redacted"
+      }
+    }
+  ]
+}

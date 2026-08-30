@@ -26,11 +26,11 @@ within `/api/v1`, tolerating unknown fields, no version lockstep).
                      Internet
                          |
                 Screenkeeper Control
-             Kotlin + http4k + Jdbi + PostgreSQL
-                         |
-                  outbound HTTPS only
-                         |
-                 Screenkeeper Player
+          Kotlin + http4k + Jdbi + PostgreSQL
+                    /             \
+        signed S3 URLs       outbound HTTPS only
+                 /                 \
+      S3-compatible store      Screenkeeper Player
                 /         |         \
              DP-1       DP-2       DP-3   (physical connectors/TVs)
 ```
@@ -71,7 +71,7 @@ appliance. The second is what an operator wrote in the appliance's
 `config.yaml`. Screenkeeper Control stores and returns both separately
 (`players.*` + `player_reports.report` for the player's identity/liveness,
 and `player_reports.report.configured_bindings` for the operator's intent)
-so that a future phase can compare them -- to notice that a display was
+so the control plane can compare them -- to notice that a display was
 swapped, or that a player is bound to a connector that no longer exists.
 Merging them at any layer would throw that signal away.
 
@@ -80,11 +80,11 @@ Merging them at any layer would throw that signal away.
 ```text
 http4k (routes, models, filters, security)
     |
-application services (enrollment, heartbeat, registry)
+application services (enrollment, heartbeat, registry, assets, content)
     |
-Jdbi repositories
+Jdbi repositories        ObjectStore
     |
-PostgreSQL
+PostgreSQL               S3-compatible storage
 ```
 
 - **http**: route definitions, request/response DTOs (kotlinx.serialization
@@ -92,11 +92,33 @@ PostgreSQL
   the single error-mapping filter that turns any failure into the shared
   `{error, message}` JSON shape without leaking stack traces or SQL detail.
 - **application**: the actual business flows -- create-or-reuse enrollment,
-  claim, record heartbeat, and simple CRUD for organizations/locations/
-  players -- each owning its own transaction boundary via Jdbi.
+  claim, record heartbeat, asset revision finalization, manifest generation,
+  assignment revisioning, and CRUD -- each owning its transaction boundary.
 - **persistence**: one repository per table, plain classes operating on an
   injected `Handle`. **Flyway owns the schema exclusively** -- Jdbi never
   creates or alters a table, and there is no ORM-style auto-migration.
+- **storage**: a narrow `ObjectStore` boundary (`head`, `presignPut`, and
+  `presignGet`). The S3 adapter signs direct transfers; control never proxies
+  media bytes and has no delete operation.
+
+## Content synchronization
+
+Control owns logical assets, immutable numbered revisions, per-device/local-
+player assignments, and the monotonic manifest revision. S3-compatible storage
+owns media bytes. Keys are content-addressed only as
+`assets/<first-two-hash-characters>/<sha256>`; original filenames never affect
+paths and available objects are never overwritten.
+
+The edge pulls fresh signed download URLs, streams a unique temporary file,
+verifies exact size and SHA-256, fsyncs, and atomically installs it in the local
+cache before selecting it. Playback reads that selected local path. The signed
+URL is never persisted. Desired, cached, selected-active, and actually-playing
+revision IDs are reported through a dedicated latest-snapshot endpoint, not
+mixed into the heartbeat.
+
+This ordering is the outage guarantee: a manifest, control, storage, download,
+checksum, or status-report failure cannot replace the current selection, so
+valid signage continues without WAN access.
 
 ## Deployment model
 
@@ -108,7 +130,9 @@ for both development and deployment. A typical local development topology:
 
 ```text
 Host Linux
-├── signage-controller agent run        (host-native, unchanged)
+├── signage-controller agent run        (host-native)
+├── signage-controller content run      (host-native)
+├── signage-controller playback run     (host-native)
 │
 └── Docker / local services
     ├── screenkeeper-control
@@ -117,17 +141,14 @@ Host Linux
 
 ## Deliberately not implemented in this phase
 
-The following are explicitly out of scope for the enrollment/heartbeat
-slice this document describes, and no placeholder tables or abstractions
-for them exist in the schema or codebase:
+The following remain explicitly out of scope:
 
-- Asset and object storage
-- Deployment manifests, playlists, schedules
-- Download URLs / content distribution
+- Object deletion and cache garbage collection
+- Playlists, schedules, multipart upload administration, and analytics
 - NATS / JetStream or any other message bus
 - Remote shell, SSH proxying, or arbitrary server-issued commands to a
   player -- Screenkeeper is a desired-state system, not a remote-access tool
 - A web UI (the admin API is exercised via curl/httpie for this phase)
 
-These may become later phases, but this phase deliberately does not build
-extension points for them ahead of an actual second use case.
+This phase deliberately does not build extension points for them ahead of an
+actual second use case.

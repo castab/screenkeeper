@@ -27,6 +27,12 @@ val ErrorHandlingFilter: Filter = Filter { next ->
                 is DomainError.OrganizationNotFound -> Status.NOT_FOUND
                 is DomainError.LocationNotFound -> Status.NOT_FOUND
                 is DomainError.PlayerNotFound -> Status.NOT_FOUND
+                is DomainError.AssetNotFound -> Status.NOT_FOUND
+                is DomainError.AssetRevisionNotFound -> Status.NOT_FOUND
+                is DomainError.AssetRevisionUnavailable -> Status.CONFLICT
+                is DomainError.PlaybackPlayerNotFound -> Status.NOT_FOUND
+                is DomainError.ObjectStorageUnavailable -> Status.SERVICE_UNAVAILABLE
+                is DomainError.ObjectIntegrityMismatch -> Status.CONFLICT
                 is DomainError.InvalidCredential -> Status.UNAUTHORIZED
                 is DomainError.RevokedCredential -> Status.FORBIDDEN
                 is DomainError.MalformedRequest -> Status.BAD_REQUEST

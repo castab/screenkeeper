@@ -19,6 +19,9 @@ from .control_plane.agent import run_agent
 from .control_plane.client import ControlPlaneClient, ControlPlaneError
 from .control_plane.enrollment import enroll
 from .control_plane.identity import DeviceStore
+from .content.reconciler import ContentReconciler, build_content_status, run_content
+from .content.resolver import MediaResolver
+from .content.store import ContentStore
 from .controller import DesiredInputError, converge, run_all
 from .inventory.drm import Inventory, collect_inventory
 from .observability import MetricsServer, PrometheusMetricsReporter
@@ -97,6 +100,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     agent_commands = agent_parser.add_subparsers(dest="agent_command", required=True)
     agent_commands.add_parser("run")
+
+    content_parser = commands.add_parser(
+        "content", help="Synchronize remotely assigned media into the persistent local cache."
+    )
+    content_commands = content_parser.add_subparsers(dest="content_command", required=True)
+    content_status_parser = content_commands.add_parser("status", help="Show local content state.")
+    content_status_parser.add_argument("--json", action="store_true", dest="as_json")
+    content_commands.add_parser("sync", help="Run one content reconciliation.")
+    content_commands.add_parser("run", help="Continuously reconcile desired content.")
 
     upgrade_parser = commands.add_parser(
         "upgrade", help="Install and activate the latest published release."
@@ -183,6 +195,8 @@ async def _run(args: argparse.Namespace) -> int:
         return await _run_device_command(args, config, state_store)
     if args.command == "agent":
         return await _run_agent_command(args, config, state_store)
+    if args.command == "content":
+        return await _run_content_command(args, config, state_store)
 
     tv_config = config.get_tv(args.tv_id)
     television = _make_television(tv_config, state_store)
@@ -453,7 +467,18 @@ async def _playback_run(config: ApplicationConfig, state_store: StateStore) -> i
             state_store.state_dir, name="playback.lock", command="playback run"
         ):
             await run_playback(
-                playback, stop_event, status_reporter=reporter, tracer=tracing_handle.tracer
+                playback,
+                stop_event,
+                status_reporter=reporter,
+                tracer=tracing_handle.tracer,
+                media_resolver=MediaResolver(
+                    ContentStore(
+                        state_store.state_dir,
+                        cache_dir=config.content.cache_dir if config.content is not None else None,
+                    )
+                    if config.content is not None and config.content.enabled
+                    else None
+                ),
             )
     except ControllerAlreadyRunningError as err:
         LOGGER.error("%s", err)
@@ -487,6 +512,87 @@ async def _run_agent_command(
     if args.agent_command == "run":
         return await _agent_run(config, state_store)
     raise AssertionError(f"Unhandled agent command {args.agent_command}")
+
+
+async def _run_content_command(
+    args: argparse.Namespace, config: ApplicationConfig, state_store: StateStore
+) -> int:
+    content = config.content
+    store = ContentStore(
+        state_store.state_dir,
+        cache_dir=content.cache_dir if content is not None else None,
+    )
+    if args.content_command == "status":
+        return _content_status(store, as_json=args.as_json)
+    if content is None or not content.enabled:
+        if args.content_command == "run":
+            LOGGER.info("No enabled 'content' section is configured; content synchronization is inactive.")
+            return 0
+        LOGGER.error("No enabled 'content' section is configured.")
+        return 1
+    if config.control_plane is None:
+        LOGGER.error("Content synchronization requires a 'control_plane' section.")
+        return 1
+    device_store = DeviceStore(state_store.state_dir)
+    identity = device_store.load()
+    if identity is None or not identity.is_enrolled:
+        LOGGER.error("This player is not enrolled. Run 'signage-controller device enroll' first.")
+        return 1
+    client = ControlPlaneClient(
+        config.control_plane.base_url, timeout=config.control_plane.request_timeout
+    )
+    reconciler = ContentReconciler(config, content, client, identity, store)
+    try:
+        with acquire_controller_lock(
+            state_store.state_dir, name="content.lock", command=f"content {args.content_command}"
+        ):
+            if args.content_command == "sync":
+                try:
+                    return 0 if await reconciler.reconcile() else 1
+                except ControlPlaneError as err:
+                    LOGGER.error("%s", err)
+                    return 1
+            if args.content_command == "run":
+                stop_event = asyncio.Event()
+                loop = asyncio.get_running_loop()
+                for signum in (signal.SIGINT, signal.SIGTERM):
+                    with contextlib.suppress(NotImplementedError):
+                        loop.add_signal_handler(signum, stop_event.set)
+                await run_content(reconciler, content, stop_event)
+                return 0
+    except ControllerAlreadyRunningError as err:
+        LOGGER.error("%s", err)
+        return 1
+    raise AssertionError(f"Unhandled content command {args.content_command}")
+
+
+def _content_status(store: ContentStore, *, as_json: bool) -> int:
+    state = store.load_state()
+    report = build_content_status(store, state)
+    report["cache_dir"] = str(store.cache_dir)
+    report["cached_assets"] = [path.name for path in store.cached_files()]
+    if as_json:
+        print(json.dumps(report, indent=2, sort_keys=True))
+        return 0
+    print(f"Manifest revision: {report['manifest_revision']}")
+    print(f"Last successful sync: {state.get('last_successful_sync_at') or 'never'}")
+    print(f"Cache directory: {store.cache_dir}")
+    cached = report["cached_assets"]
+    print(f"Cached assets: {', '.join(cached) if cached else '(none)'}")
+    players = report["players"]
+    if not players:
+        print("Players: (no remote content state)")
+    for player in players:
+        print(
+            f"{player['player_id']}: status={player['status']} "
+            f"desired={player['desired_asset_revision_id'] or '-'} "
+            f"cached={player['cached_asset_revision_id'] or '-'} "
+            f"selected={player['active_asset_revision_id'] or '-'} "
+            f"playing={player['playing_asset_revision_id'] or '-'}"
+        )
+        if player["last_error"]:
+            print(f"  last error: {player['last_error']}")
+    return 0
 
 
 def _make_client(config: ApplicationConfig) -> ControlPlaneClient | None:
