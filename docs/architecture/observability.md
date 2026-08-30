@@ -266,6 +266,23 @@ healthy, since the three processes are architecturally independent.
 No alerting platform is implemented as part of this work -- the metrics
 above are what a central Prometheus-compatible alerting layer would query.
 
+A handful of example PromQL expressions, for whoever configures that central
+alerting layer -- these are illustrations, not a shipped ruleset:
+
+| Condition | Example PromQL |
+|---|---|
+| Screenkeeper process down | `up{job="signage_controller"} == 0` |
+| TV connection lost | `signage_controller_tv_connection_up == 0` |
+| Playback not running | `signage_controller_player_up == 0` |
+| Player crash-looping | `increase(signage_controller_player_restarts_total[15m]) > 3` |
+| Control-plane heartbeat stale | `time() - signage_controller_control_plane_last_success_timestamp_seconds > 300` |
+| Control-plane credential rejected | `signage_controller_control_plane_auth_rejected == 1` |
+| Enrollment claims failing | `increase(screenkeeper_enrollment_claim_total{result!="success"}[15m]) > 5` |
+| Enrollment reaper stalled | `increase(screenkeeper_enrollment_reap_runs_total[15m]) == 0` |
+
+(The reaper's default `interval` is 5 minutes, so a 15-minute window with
+zero runs is a real stall signal, not noise.)
+
 ## Logs
 
 The Remote Write refactor also removed `LokiHandler`, the push-based log
@@ -386,9 +403,13 @@ http4k's Jetty server and the JDBC driver); an actual Alloy→Loki log pipeline
 verified against a local Loki in the dev stack); a bearer-token auth
 convention across all three telemetry channels (metrics/traces/logs), fleet-
 appropriate for headless, unattended appliances; Loki and Tempo added to the
-local dev compose stack, with Grafana datasources provisioned for both.
+local dev compose stack, with Grafana datasources provisioned for both;
+domain-level control-plane counters on `EnrollmentService`/`EnrollmentReaper`
+(enrollment attempts, claims, and reaper runs, each tagged by a bounded
+outcome/result label); Grafana dashboard coverage for the
+`signage_controller_control_plane_*` heartbeat metrics; example PromQL alert
+expressions documented in "Health and heartbeat semantics" above.
 
-**Deferred:** content-sync metrics (no such subsystem exists yet);
-domain-level control-plane counters beyond the one HTTP request timer;
-an expanded/redesigned Grafana dashboard beyond the panels added so far;
-any alerting platform.
+**Deferred:** content-sync metrics (no such subsystem exists yet); further
+Grafana dashboard expansion beyond the panels added so far; any alerting
+platform.

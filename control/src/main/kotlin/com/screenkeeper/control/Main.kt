@@ -56,6 +56,15 @@ fun main() {
     val jdbi = JdbiFactory.build(dataSource)
     val clock = Clock.systemUTC()
 
+    val meterRegistry = PrometheusMeterRegistry(PrometheusConfig.DEFAULT)
+    // Standard JVM/process metrics via Micrometer's own binders -- the same
+    // "uptime via a standard collector, not a bespoke metric" answer as the
+    // edge side's prometheus_client process collectors (see observability.py).
+    JvmMemoryMetrics().bindTo(meterRegistry)
+    JvmGcMetrics().bindTo(meterRegistry)
+    ProcessorMetrics().bindTo(meterRegistry)
+    UptimeMetrics().bindTo(meterRegistry)
+
     val organizationRepository = OrganizationRepository()
     val locationRepository = LocationRepository()
     val playerRepository = PlayerRepository()
@@ -65,7 +74,7 @@ fun main() {
 
     val enrollmentService = EnrollmentService(
         jdbi, config, clock, enrollmentRepository, playerRepository, playerCredentialRepository,
-        locationRepository, organizationRepository,
+        locationRepository, organizationRepository, meterRegistry,
     )
     val heartbeatService = HeartbeatService(jdbi, clock, playerRepository, playerReportRepository)
     val organizationService = OrganizationService(jdbi, organizationRepository)
@@ -75,18 +84,9 @@ fun main() {
     )
 
     val reaper = EnrollmentReaper(
-        jdbi, enrollmentRepository, clock, Duration.ofMinutes(config.enrollmentReapAfterMinutes),
+        jdbi, enrollmentRepository, clock, Duration.ofMinutes(config.enrollmentReapAfterMinutes), meterRegistry,
     )
     reaper.start()
-
-    val meterRegistry = PrometheusMeterRegistry(PrometheusConfig.DEFAULT)
-    // Standard JVM/process metrics via Micrometer's own binders -- the same
-    // "uptime via a standard collector, not a bespoke metric" answer as the
-    // edge side's prometheus_client process collectors (see observability.py).
-    JvmMemoryMetrics().bindTo(meterRegistry)
-    JvmGcMetrics().bindTo(meterRegistry)
-    ProcessorMetrics().bindTo(meterRegistry)
-    UptimeMetrics().bindTo(meterRegistry)
 
     val app = Routes.build(
         jdbi = jdbi,

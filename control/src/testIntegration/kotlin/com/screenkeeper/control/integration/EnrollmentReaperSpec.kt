@@ -52,6 +52,7 @@ class EnrollmentReaperSpec : FunSpec({
             app.enrollmentRepository,
             Clock.fixed(fixedNow.plusSeconds(1), ZoneOffset.UTC),
             reapAfter = Duration.ZERO,
+            meterRegistry = app.meterRegistry,
             interval = Duration.ofMillis(20),
             tracer = tracer,
         )
@@ -67,5 +68,11 @@ class EnrollmentReaperSpec : FunSpec({
         // OTel convention: successful spans stay UNSET; only failures get ERROR.
         span.status.statusCode shouldBe StatusCode.UNSET
         span.attributes.get(AttributeKey.longKey("enrollment.reaped_count")) shouldBe 1L
+
+        val runsCount = app.meterRegistry.find("screenkeeper.enrollment.reap.runs")
+            .tags("result", "success").counter()?.count() ?: 0.0
+        (runsCount >= 1.0) shouldBe true
+        val removedCount = app.meterRegistry.find("screenkeeper.enrollment.reap.removed").counter()?.count() ?: 0.0
+        (removedCount >= 1.0) shouldBe true
     }
 })
