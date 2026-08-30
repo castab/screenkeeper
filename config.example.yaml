@@ -44,6 +44,17 @@ tvs:
 #   # when this is explicitly set for local development against a dev server.
 #   # allow_insecure_http: false
 
+# Optional desired content synchronization. The content service downloads
+# assigned videos into a persistent hash-addressed cache, verifies SHA-256,
+# and only then makes them available to playback. Existing YAML media remains
+# the fallback. Requires control_plane configuration and enrollment.
+# content:
+#   enabled: true
+#   reconcile_interval: 300
+#   download_timeout: 3600
+#   # Defaults to <state-dir>/media; never place remote content under /etc.
+#   # cache_dir: /var/lib/signage-controller/media
+
 # Optional local mpv signage playback, independent of TV control above.
 # Requires mpv installed on this host; used only by `signage-controller
 # playback ...` commands. See README.md for the full walkthrough.

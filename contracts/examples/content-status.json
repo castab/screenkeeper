@@ -1,0 +1,16 @@
+{
+  "reported_at": "2026-08-29T04:00:00Z",
+  "manifest_revision": 18,
+  "players": [
+    {
+      "player_id": "dev-menu",
+      "status": "active",
+      "desired_asset_revision_id": "019254c1-bbbb-7a13-8d4f-6e7f8a9b0c1d",
+      "cached_asset_revision_id": "019254c1-bbbb-7a13-8d4f-6e7f8a9b0c1d",
+      "active_asset_revision_id": "019254c1-bbbb-7a13-8d4f-6e7f8a9b0c1d",
+      "playing_asset_revision_id": "019254c1-bbbb-7a13-8d4f-6e7f8a9b0c1d",
+      "last_sync_at": "2026-08-29T04:00:00Z",
+      "last_error": null
+    }
+  ]
+}

@@ -6,6 +6,7 @@ import com.screenkeeper.control.domain.Organization
 import com.screenkeeper.control.domain.Player
 import com.screenkeeper.control.domain.isOnline
 import com.screenkeeper.control.persistence.repository.LocationRepository
+import com.screenkeeper.control.persistence.repository.ContentRepository
 import com.screenkeeper.control.persistence.repository.OrganizationRepository
 import com.screenkeeper.control.persistence.repository.PlayerReportRepository
 import com.screenkeeper.control.persistence.repository.PlayerRepository
@@ -24,6 +25,7 @@ data class PlayerSummary(
 data class PlayerDetail(
     val summary: PlayerSummary,
     val latestReportJson: String?,
+    val latestContentStatusJson: String?,
 )
 
 class PlayerRegistryService(
@@ -34,6 +36,7 @@ class PlayerRegistryService(
     private val locationRepository: LocationRepository,
     private val organizationRepository: OrganizationRepository,
     private val playerReportRepository: PlayerReportRepository,
+    private val contentRepository: ContentRepository,
 ) {
     fun list(): List<PlayerSummary> =
         jdbi.withHandle<List<PlayerSummary>, RuntimeException> { handle ->
@@ -45,7 +48,7 @@ class PlayerRegistryService(
             val player = playerRepository.findById(handle, playerId) ?: return@withHandle null
             val summary = toSummary(handle, player)
             val report = playerReportRepository.findByPlayerId(handle, playerId)
-            PlayerDetail(summary, report?.reportJson)
+            PlayerDetail(summary, report?.reportJson, contentRepository.reportJson(handle, playerId))
         }
 
     private fun toSummary(handle: Handle, player: Player): PlayerSummary {

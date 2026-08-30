@@ -77,4 +77,30 @@ class AppConfigSpec : FunSpec({
         text shouldContain "AppConfig("
         (text.contains("secret") || text.contains("a-strong-admin-token")) shouldBe false
     }
+
+    test("S3 configuration is optional and partial configuration fails fast") {
+        AppConfig.fromEnv(validEnv).objectStorage shouldBe null
+        val error = shouldThrow<ConfigError> {
+            AppConfig.fromEnv(validEnv + ("S3_BUCKET" to "media"))
+        }
+        error.message shouldContain "S3_ENDPOINT"
+        error.message shouldContain "S3_SECRET_ACCESS_KEY"
+    }
+
+    test("S3 configuration uses protocol-oriented variables and redacts credentials") {
+        val config = AppConfig.fromEnv(
+            validEnv + mapOf(
+                "S3_ENDPOINT" to "https://storage.railway.app",
+                "S3_BUCKET" to "screenkeeper-media",
+                "S3_ACCESS_KEY_ID" to "access-key-secret-value",
+                "S3_SECRET_ACCESS_KEY" to "storage-secret-value",
+                "S3_REGION" to "auto",
+                "S3_PATH_STYLE" to "true",
+            ),
+        )
+        config.objectStorage?.bucket shouldBe "screenkeeper-media"
+        config.objectStorage?.pathStyle shouldBe true
+        config.toString().contains("access-key-secret-value") shouldBe false
+        config.toString().contains("storage-secret-value") shouldBe false
+    }
 })

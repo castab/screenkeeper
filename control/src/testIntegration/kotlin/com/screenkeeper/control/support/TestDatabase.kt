@@ -35,7 +35,9 @@ object TestDatabase {
     fun truncateAll() {
         jdbi.useHandle<RuntimeException> { handle ->
             handle.execute(
-                "TRUNCATE TABLE player_reports, enrollments, player_credentials, players, locations, organizations " +
+                "TRUNCATE TABLE player_content_reports, player_content_assignments, player_content_manifests, " +
+                    "media_asset_revisions, media_assets, player_reports, enrollments, player_credentials, " +
+                    "players, locations, organizations " +
                     "RESTART IDENTITY CASCADE",
             )
         }

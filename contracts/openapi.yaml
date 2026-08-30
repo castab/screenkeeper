@@ -11,9 +11,10 @@ info:
     appliance: there is no callback, no webhook, and no inbound port on a
     Screenkeeper host.
 
-    This phase covers identity and observed state only. Desired-state
-    distribution, content deployment, and remote commands are deliberately not
-    part of this contract yet.
+    The contract covers identity, observed state, and desired content
+    distribution. Media bytes never pass through this API: the control plane
+    supplies short-lived object-storage URLs and the appliance downloads them
+    directly into its local cache.
 
     Compatibility rule: clients must tolerate unknown response fields, servers
     should tolerate unknown request fields, and evolution within /api/v1 is
@@ -32,6 +33,10 @@ tags:
     description: Claiming an appliance with a short-lived pairing code.
   - name: reporting
     description: Outbound observed-state reporting from an enrolled appliance.
+  - name: content
+    description: Desired media metadata and content synchronization reporting.
+  - name: administration
+    description: Administrator-managed assets and player assignments.
 
 paths:
   /enrollments:
@@ -208,6 +213,165 @@ paths:
         "503":
           $ref: "#/components/responses/Unavailable"
 
+  /players/{player_id}/content:
+    get:
+      tags: [content]
+      operationId: getDesiredContent
+      summary: Fetch the authoritative desired content manifest
+      parameters:
+        - $ref: "#/components/parameters/PlayerId"
+      responses:
+        "200":
+          description: Current desired content for the appliance.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ContentManifest"
+              examples:
+                default:
+                  $ref: "#/components/examples/ContentManifest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: Unknown player.
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /players/{player_id}/content-status:
+    put:
+      tags: [content]
+      operationId: putContentStatus
+      summary: Replace the appliance's latest content synchronization snapshot
+      parameters:
+        - $ref: "#/components/parameters/PlayerId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ContentStatusReport"
+            examples:
+              default:
+                $ref: "#/components/examples/ContentStatus"
+      responses:
+        "204":
+          description: Snapshot accepted.
+        "400":
+          description: Malformed report.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: Unknown player.
+
+  /admin/assets:
+    get:
+      tags: [administration]
+      operationId: listAssets
+      security: [{adminToken: []}]
+      responses:
+        "200":
+          description: Logical assets and their immutable revisions.
+    post:
+      tags: [administration]
+      operationId: createAsset
+      security: [{adminToken: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateAssetRequest"
+      responses:
+        "201":
+          description: Logical asset created.
+
+  /admin/assets/{asset_id}:
+    get:
+      tags: [administration]
+      operationId: getAsset
+      security: [{adminToken: []}]
+      parameters:
+        - $ref: "#/components/parameters/AssetId"
+      responses:
+        "200":
+          description: Logical asset and revisions.
+        "404":
+          description: Unknown asset.
+
+  /admin/assets/{asset_id}/revisions:
+    post:
+      tags: [administration]
+      operationId: createAssetRevision
+      security: [{adminToken: []}]
+      parameters:
+        - $ref: "#/components/parameters/AssetId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateAssetRevisionRequest"
+      responses:
+        "201":
+          description: Pending revision and direct upload request.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CreateAssetRevisionResponse"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /admin/assets/{asset_id}/revisions/{revision_id}/complete:
+    post:
+      tags: [administration]
+      operationId: completeAssetRevision
+      security: [{adminToken: []}]
+      parameters:
+        - $ref: "#/components/parameters/AssetId"
+        - name: revision_id
+          in: path
+          required: true
+          schema: {type: string, format: uuid}
+      responses:
+        "200":
+          description: Revision verified and available for assignment.
+        "409":
+          description: Stored object does not match the declared metadata.
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /admin/players/{player_id}/content/{playback_player_id}:
+    put:
+      tags: [administration]
+      operationId: assignPlayerContent
+      security: [{adminToken: []}]
+      parameters:
+        - $ref: "#/components/parameters/PlayerId"
+        - $ref: "#/components/parameters/PlaybackPlayerId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AssignContentRequest"
+      responses:
+        "200":
+          description: Assignment stored and manifest revision incremented.
+    delete:
+      tags: [administration]
+      operationId: clearPlayerContent
+      security: [{adminToken: []}]
+      parameters:
+        - $ref: "#/components/parameters/PlayerId"
+        - $ref: "#/components/parameters/PlaybackPlayerId"
+      responses:
+        "204":
+          description: Assignment cleared and manifest revision incremented.
+
 components:
   securitySchemes:
     deviceToken:
@@ -217,6 +381,26 @@ components:
         The `device_token` the appliance generated for itself and sent once
         during enrollment. It is the appliance's permanent API credential. The
         server stores only a hash of it and never returns it.
+    adminToken:
+      type: http
+      scheme: bearer
+
+  parameters:
+    PlayerId:
+      name: player_id
+      in: path
+      required: true
+      schema: {type: string, format: uuid}
+    AssetId:
+      name: asset_id
+      in: path
+      required: true
+      schema: {type: string, format: uuid}
+    PlaybackPlayerId:
+      name: playback_player_id
+      in: path
+      required: true
+      schema: {type: string}
 
   examples:
     # Held as files rather than inline so the edge test suite can assert the
@@ -233,6 +417,12 @@ components:
     Heartbeat:
       summary: Observed state and configured bindings from an enrolled appliance
       externalValue: ./examples/heartbeat.json
+    ContentManifest:
+      summary: Desired content returned to an enrolled appliance
+      externalValue: ./examples/content-manifest.json
+    ContentStatus:
+      summary: Latest content synchronization state reported by an appliance
+      externalValue: ./examples/content-status.json
 
   responses:
     Unauthorized:
@@ -558,6 +748,114 @@ components:
           type: [string, "null"]
           description: Operator-supplied connector name, mutually exclusive with screen.
           examples: ["DP-1"]
+
+    ContentManifest:
+      type: object
+      additionalProperties: true
+      required: [revision, players]
+      properties:
+        revision:
+          type: integer
+          minimum: 0
+        players:
+          type: array
+          items:
+            $ref: "#/components/schemas/PlayerContentAssignment"
+
+    PlayerContentAssignment:
+      type: object
+      additionalProperties: true
+      required: [player_id, content]
+      properties:
+        player_id: {type: string}
+        content:
+          $ref: "#/components/schemas/DesiredAsset"
+
+    DesiredAsset:
+      type: object
+      additionalProperties: true
+      required: [kind, asset_id, asset_revision_id, revision, original_filename, content_type, byte_size, sha256, download_url]
+      properties:
+        kind: {type: string, enum: [asset]}
+        asset_id: {type: string, format: uuid}
+        asset_revision_id: {type: string, format: uuid}
+        revision: {type: integer, minimum: 1}
+        original_filename: {type: string}
+        content_type: {type: string, pattern: '^video/'}
+        byte_size: {type: integer, minimum: 1}
+        sha256: {type: string, pattern: '^[0-9a-f]{64}$'}
+        download_url: {type: string, format: uri}
+
+    ContentStatusReport:
+      type: object
+      additionalProperties: true
+      required: [reported_at, manifest_revision, players]
+      properties:
+        reported_at: {type: string, format: date-time}
+        manifest_revision: {type: integer, minimum: 0}
+        players:
+          type: array
+          items:
+            $ref: "#/components/schemas/PlayerContentStatus"
+
+    PlayerContentStatus:
+      type: object
+      additionalProperties: true
+      required: [player_id, status]
+      properties:
+        player_id: {type: string}
+        status: {type: string, enum: [desired, downloading, available, active, failed]}
+        desired_asset_revision_id: {type: [string, "null"], format: uuid}
+        cached_asset_revision_id: {type: [string, "null"], format: uuid}
+        active_asset_revision_id: {type: [string, "null"], format: uuid}
+        playing_asset_revision_id: {type: [string, "null"], format: uuid}
+        last_sync_at: {type: [string, "null"], format: date-time}
+        last_error: {type: [string, "null"]}
+
+    CreateAssetRequest:
+      type: object
+      additionalProperties: true
+      required: [name]
+      properties:
+        name: {type: string, minLength: 1}
+
+    CreateAssetRevisionRequest:
+      type: object
+      additionalProperties: true
+      required: [original_filename, content_type, byte_size, sha256]
+      properties:
+        original_filename: {type: string, minLength: 1}
+        content_type: {type: string, pattern: '^video/'}
+        byte_size: {type: integer, minimum: 1}
+        sha256: {type: string, pattern: '^[0-9a-f]{64}$'}
+
+    CreateAssetRevisionResponse:
+      type: object
+      additionalProperties: true
+      required: [asset_revision_id, revision, status, upload]
+      properties:
+        asset_revision_id: {type: string, format: uuid}
+        revision: {type: integer, minimum: 1}
+        status: {type: string, enum: [pending, available]}
+        upload:
+          type: object
+          additionalProperties: true
+          required: [required]
+          properties:
+            required: {type: boolean}
+            method: {type: string, enum: [PUT]}
+            url: {type: string, format: uri}
+            headers:
+              type: object
+              additionalProperties: {type: string}
+            expires_at: {type: string, format: date-time}
+
+    AssignContentRequest:
+      type: object
+      additionalProperties: true
+      required: [asset_revision_id]
+      properties:
+        asset_revision_id: {type: string, format: uuid}
 
     Error:
       type: object

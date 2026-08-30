@@ -3,6 +3,8 @@ package com.screenkeeper.control
 import com.screenkeeper.control.application.enrollment.EnrollmentReaper
 import com.screenkeeper.control.application.enrollment.EnrollmentService
 import com.screenkeeper.control.application.heartbeat.HeartbeatService
+import com.screenkeeper.control.application.content.AssetService
+import com.screenkeeper.control.application.content.ContentService
 import com.screenkeeper.control.application.registry.LocationService
 import com.screenkeeper.control.application.registry.OrganizationService
 import com.screenkeeper.control.application.registry.PlayerRegistryService
@@ -13,11 +15,14 @@ import com.screenkeeper.control.http.routes.Routes
 import com.screenkeeper.control.persistence.jdbi.JdbiFactory
 import com.screenkeeper.control.persistence.migration.Migrator
 import com.screenkeeper.control.persistence.repository.EnrollmentRepository
+import com.screenkeeper.control.persistence.repository.ContentRepository
+import com.screenkeeper.control.persistence.repository.MediaAssetRepository
 import com.screenkeeper.control.persistence.repository.LocationRepository
 import com.screenkeeper.control.persistence.repository.OrganizationRepository
 import com.screenkeeper.control.persistence.repository.PlayerCredentialRepository
 import com.screenkeeper.control.persistence.repository.PlayerReportRepository
 import com.screenkeeper.control.persistence.repository.PlayerRepository
+import com.screenkeeper.control.storage.S3ObjectStore
 import io.micrometer.core.instrument.binder.jvm.JvmGcMetrics
 import io.micrometer.core.instrument.binder.jvm.JvmMemoryMetrics
 import io.micrometer.core.instrument.binder.system.ProcessorMetrics
@@ -71,6 +76,9 @@ fun main() {
     val playerCredentialRepository = PlayerCredentialRepository()
     val enrollmentRepository = EnrollmentRepository()
     val playerReportRepository = PlayerReportRepository()
+    val mediaAssetRepository = MediaAssetRepository()
+    val contentRepository = ContentRepository()
+    val objectStore = config.objectStorage?.let(::S3ObjectStore)
 
     val enrollmentService = EnrollmentService(
         jdbi, config, clock, enrollmentRepository, playerRepository, playerCredentialRepository,
@@ -80,7 +88,16 @@ fun main() {
     val organizationService = OrganizationService(jdbi, organizationRepository)
     val locationService = LocationService(jdbi, locationRepository, organizationRepository)
     val playerRegistryService = PlayerRegistryService(
-        jdbi, clock, config, playerRepository, locationRepository, organizationRepository, playerReportRepository,
+        jdbi, clock, config, playerRepository, locationRepository, organizationRepository,
+        playerReportRepository, contentRepository,
+    )
+    val assetService = AssetService(
+        jdbi, clock, mediaAssetRepository, objectStore,
+        config.objectStorage?.uploadUrlTtlSeconds ?: 3600L,
+    )
+    val contentService = ContentService(
+        jdbi, clock, playerRepository, playerReportRepository, mediaAssetRepository,
+        contentRepository, objectStore, config.objectStorage?.downloadUrlTtlSeconds ?: 3600L,
     )
 
     val reaper = EnrollmentReaper(
@@ -99,6 +116,8 @@ fun main() {
         organizationService = organizationService,
         locationService = locationService,
         playerRegistryService = playerRegistryService,
+        assetService = assetService,
+        contentService = contentService,
         enrollmentRepository = enrollmentRepository,
         playerRepository = playerRepository,
         playerCredentialRepository = playerCredentialRepository,
@@ -128,6 +147,7 @@ fun main() {
         Thread {
             logger.info("Shutting down screenkeeper-control")
             reaper.stop()
+            objectStore?.close()
             metricsServer?.stop()
             server.stop()
         },

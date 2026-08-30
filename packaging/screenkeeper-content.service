@@ -1,0 +1,20 @@
+[Unit]
+Description=Screenkeeper content synchronization
+Documentation=https://github.com/castab/screenkeeper
+# Installed but disabled. Content synchronization is outbound-only and keeps
+# retrying without affecting TV control or local mpv playback.
+
+[Service]
+Type=simple
+ExecStart=@INSTALL_ROOT@/current/venv/bin/signage-controller \
+    --config @CONFIG_DIR@/config.yaml \
+    --state-dir @STATE_DIR@ \
+    content run
+Restart=on-failure
+RestartSec=30
+KillSignal=SIGINT
+TimeoutStopSec=30
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=default.target

@@ -4,7 +4,8 @@ The cloud/server-side control plane for Screenkeeper. Implements the server
 side of the shared contract at [`contracts/openapi.yaml`](../contracts/openapi.yaml):
 appliance enrollment via a short pairing code, and heartbeat reporting of
 observed display hardware and configured bindings. It also exposes a small
-admin API for creating organizations/locations and claiming enrollments.
+admin API for organizations/locations, enrollment claims, immutable video
+assets, and per-player content assignments.
 
 See [`contracts/README.md`](../contracts/README.md) for the compatibility
 rules this server and the Screenkeeper Edge player both honor, and
@@ -28,7 +29,8 @@ for the broader architecture.
 | kotlinx-datetime | 0.6.1 | `Instant` (de)serialization for wire timestamps |
 | HikariCP | 6.2.1 | Connection pool feeding Jdbi's `DataSource` |
 | logback-classic | 1.5.12 | See `src/main/resources/logback.xml` |
-| OkHttp | 5.0.0 | **Reserved, not a build dependency yet** -- no outbound HTTP integration exists in this slice |
+| AWS SDK for Kotlin | 1.5.79 | S3-compatible `head` and presigning only; media bytes never pass through Control |
+| OkHttp | 5.0.0 | HTTP engine for the AWS Kotlin S3 client |
 
 **Java 25 note:** Kotlin 2.2.20's compiler does not yet document explicit
 support for JVM bytecode target `25` ("Kotlin does not yet support 25 JDK
@@ -55,9 +57,9 @@ container is the right fit.
 
 ```text
 http (routes, models, filters)
-    -> application (enrollment, heartbeat, registry)
-        -> persistence (repositories, Jdbi)
-            -> PostgreSQL
+    -> application (enrollment, heartbeat, registry, assets, content)
+        -> persistence (repositories, Jdbi) -> PostgreSQL
+        -> ObjectStore -> S3-compatible storage
 ```
 
 Jdbi is used via explicit `Handle` + `Jdbi.inTransaction`/`useTransaction`/
@@ -127,9 +129,26 @@ their own throwaway database.
 | `SCREENKEEPER_CONTROL_METRICS_ENABLED` | no | `true` | Local Prometheus `/metrics` exposition |
 | `SCREENKEEPER_CONTROL_METRICS_HOST` | no | `127.0.0.1` | Bound on a separate listener from `SCREENKEEPER_CONTROL_PORT` -- see below |
 | `SCREENKEEPER_CONTROL_METRICS_PORT` | no | `9464` | |
+| `S3_ENDPOINT` | storage | -- | S3-compatible HTTPS endpoint |
+| `S3_BUCKET` | storage | -- | Bucket name |
+| `S3_ACCESS_KEY_ID` | storage | -- | Credential; never logged |
+| `S3_SECRET_ACCESS_KEY` | storage | -- | Credential; never logged |
+| `S3_REGION` | storage | -- | Signing region |
+| `S3_PATH_STYLE` | no | `false` | Set `true` for providers requiring path-style addressing |
+| `S3_UPLOAD_URL_TTL_SECONDS` | no | `3600` | Presigned PUT lifetime |
+| `S3_DOWNLOAD_URL_TTL_SECONDS` | no | `3600` | Presigned GET lifetime |
 
 `online` is always computed at read time from `last_seen_at` -- it is never
 persisted as a boolean that could go stale.
+
+Storage is disabled when none of the five required `S3_*` variables is set, so
+existing deployments start unchanged. If any is present, all five are
+required; startup reports the missing variable names without rendering either
+credential. `S3_*` names describe the supported protocol, not a vendor.
+Railway Buckets can map `BUCKET`, `ENDPOINT`, `ACCESS_KEY_ID`,
+`SECRET_ACCESS_KEY`, and `REGION` directly into their corresponding variables;
+other S3-compatible services can use endpoint, region, and path-style settings.
+See [Railway's storage-bucket documentation](https://docs.railway.com/storage-buckets).
 
 ## Observability
 
@@ -215,6 +234,54 @@ curl -s "$BASE/api/v1/admin/players" -H "Authorization: Bearer $ADMIN"
 curl -s "$BASE/api/v1/admin/players/<player-id>" -H "Authorization: Bearer $ADMIN"
 ```
 
+## Direct content upload walkthrough
+
+The upload never passes through Screenkeeper Control. This curl flow creates a
+logical asset and immutable revision, uploads bytes with every returned signed
+header, finalizes by HEAD verification, assigns the revision to the local
+playback ID `dev-menu`, and lets the appliance reconcile it:
+
+```bash
+FILE=menu.mp4
+SHA=$(sha256sum "$FILE" | cut -d' ' -f1)
+SIZE=$(stat -c%s "$FILE")
+
+ASSET=$(curl -s -X POST "$BASE/api/v1/admin/assets" \
+  -H "Authorization: Bearer $ADMIN" -H "Content-Type: application/json" \
+  -d '{"name":"Main menu"}')
+ASSET_ID=$(printf '%s' "$ASSET" | jq -r .id)
+
+REVISION=$(curl -s -X POST "$BASE/api/v1/admin/assets/$ASSET_ID/revisions" \
+  -H "Authorization: Bearer $ADMIN" -H "Content-Type: application/json" \
+  -d "{\"original_filename\":\"menu.mp4\",\"content_type\":\"video/mp4\",\"byte_size\":$SIZE,\"sha256\":\"$SHA\"}")
+REVISION_ID=$(printf '%s' "$REVISION" | jq -r .asset_revision_id)
+UPLOAD_URL=$(printf '%s' "$REVISION" | jq -r .upload.url)
+
+# Convert every .upload.headers entry into a curl -H argument. Do not omit
+# checksum/content headers: they are part of the signature and finalization.
+mapfile -t UPLOAD_HEADERS < <(printf '%s' "$REVISION" | jq -r '.upload.headers | to_entries[] | "\(.key): \(.value)"')
+CURL_HEADERS=()
+for header in "${UPLOAD_HEADERS[@]}"; do CURL_HEADERS+=(-H "$header"); done
+curl --fail -X PUT "$UPLOAD_URL" "${CURL_HEADERS[@]}" --data-binary @"$FILE"
+
+curl --fail -X POST \
+  "$BASE/api/v1/admin/assets/$ASSET_ID/revisions/$REVISION_ID/complete" \
+  -H "Authorization: Bearer $ADMIN"
+curl --fail -X PUT \
+  "$BASE/api/v1/admin/players/<player-id>/content/dev-menu" \
+  -H "Authorization: Bearer $ADMIN" -H "Content-Type: application/json" \
+  -d "{\"asset_revision_id\":\"$REVISION_ID\"}"
+
+# On the enrolled appliance:
+signage-controller content sync
+signage-controller content status
+```
+
+Confirm that mpv transitions to the hash-named cached file, disconnect WAN,
+and confirm the same video keeps looping. Assignment removal uses `DELETE` on
+the assignment URL. It increments the manifest revision and returns playback
+to the YAML media path only when that fallback exists.
+
 ## Security notes
 
 - The device token and pairing code are stored only as SHA-256 hashes
@@ -235,6 +302,7 @@ curl -s "$BASE/api/v1/admin/players/<player-id>" -H "Authorization: Bearer $ADMI
 
 ## Deliberately out of scope for this phase
 
-Asset/object storage, deployments, playlists, schedules, manifests,
-download URLs, NATS/JetStream, and any form of remote command execution.
-See `docs/architecture/control-plane.md` for the full list and rationale.
+Object deletion, media proxying, cache garbage collection, playlists,
+schedules, multipart administration, NATS/JetStream, playback analytics, and
+any form of remote command execution. See
+`docs/architecture/control-plane.md` for the full list and rationale.
